@@ -1,0 +1,9 @@
+# Godot 4 编辑器缓存与导入缓存（可重新生成，勿提交）
+.godot/
+
+# macOS
+.DS_Store
+
+# 日志与临时文件
+*.log
+*.tmp
