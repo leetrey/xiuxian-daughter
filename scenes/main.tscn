@@ -1,7 +1,9 @@
 [gd_scene load_steps=2 format=3]
 
-[ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
+[ext_resource path="res://scripts/main.gd" type="Script" id="1_main"]
 
+; 场景文件只保留一个铺满窗口的根节点，具体控件由 main.gd 动态创建。
+; 这样原型阶段调整布局时不必同时维护大量 .tscn 节点。
 [node name="Main" type="Control"]
 layout_mode = 3
 anchors_preset = 15
