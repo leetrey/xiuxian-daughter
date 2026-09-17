@@ -1,0 +1,45 @@
+{
+  "note": "D1 培养回合试作。活动名、初值、成本、留空/重复规则和取整均为试算，不代表 GDD 定案。",
+  "rules": {
+    "phase_turns": [12, 24, 24],
+    "schedule_slots": 3,
+    "require_full_schedule": true,
+    "allow_repeat": true,
+    "max_energy": 10,
+    "initial_attribute": 8,
+    "initial_pressure": 12,
+    "rounding": "round"
+  },
+  "groups": {
+    "physique": {"name": "体魄", "stats": {"power": "力道", "constitution": "根骨", "agility": "身法", "will": "意志"}},
+    "dao": {"name": "道法", "stats": {"essence": "真元", "spell": "术法", "insight": "悟性", "ward": "护体"}},
+    "affinity": {"name": "仙缘", "stats": {"grace": "姿仪", "social": "人缘", "etiquette": "礼节", "fortune": "运势"}},
+    "arts": {"name": "杂学", "stats": {"alchemy": "丹道", "craft": "炼器", "painting": "丹青", "music": "音律"}}
+  },
+  "outcomes": [
+    {"name": "大成功", "multiplier": 2.5},
+    {"name": "成功", "multiplier": 1.0},
+    {"name": "失败", "multiplier": 0.8}
+  ],
+  "pressure_bands": [
+    {"min": 0, "max_exclusive": 20, "probabilities": [0.34, 0.61, 0.05]},
+    {"min": 20, "max_exclusive": 50, "probabilities": [0.22, 0.63, 0.15]},
+    {"min": 50, "max_exclusive": 80, "probabilities": [0.04, 0.66, 0.30]},
+    {"min": 80, "max_exclusive": 101, "probabilities": [0.02, 0.33, 0.65]}
+  ],
+  "initial_inventory": {"wood": 36, "stone": 24, "clearheart_grass": 3, "clearheart_pill": 0},
+  "activities": [
+    {"id": "sword", "kind": "schedule", "name": "庭中习剑", "min_phase": 0, "pressure": 8, "growth": {"power": 3, "agility": 2, "will": 1}},
+    {"id": "breathing", "kind": "schedule", "name": "晨昏吐纳", "min_phase": 0, "pressure": 6, "growth": {"essence": 2, "spell": 1, "insight": 2, "ward": 1}},
+    {"id": "classics", "kind": "schedule", "name": "识礼读书", "min_phase": 0, "pressure": 5, "growth": {"grace": 1, "social": 1, "etiquette": 3, "fortune": 1}},
+    {"id": "herbalism", "kind": "schedule", "name": "辨识草木", "min_phase": 0, "pressure": 5, "growth": {"alchemy": 4, "constitution": 2}},
+    {"id": "craft", "kind": "schedule", "name": "工巧入门", "min_phase": 0, "pressure": 7, "growth": {"craft": 5, "power": 1}},
+    {"id": "painting", "kind": "schedule", "name": "临池丹青", "min_phase": 0, "pressure": 5, "growth": {"painting": 5, "grace": 1}},
+    {"id": "music", "kind": "schedule", "name": "听风习乐", "min_phase": 0, "pressure": 5, "growth": {"music": 5, "etiquette": 1}},
+    {"id": "focused_breathing", "kind": "schedule", "name": "凝神吐纳", "min_phase": 1, "pressure": 9, "growth": {"essence": 4, "insight": 3, "ward": 2}},
+    {"id": "inner_breathing", "kind": "schedule", "name": "周天内观", "min_phase": 2, "pressure": 12, "growth": {"essence": 5, "spell": 3, "insight": 3, "ward": 3}},
+    {"id": "visit", "kind": "free", "name": "拜访乡邻", "min_phase": 0, "energy_cost": 2, "pressure": 0, "growth": {"social": 2, "etiquette": 1}},
+    {"id": "clearheart", "kind": "free", "name": "服用清心草", "min_phase": 0, "energy_cost": 0, "pressure": -20, "growth": {}, "costs": {"clearheart_grass": 1}},
+    {"id": "clearheart_pill", "kind": "free", "name": "服用清心丹", "min_phase": 0, "energy_cost": 0, "pressure": -50, "growth": {}, "costs": {"clearheart_pill": 1}}
+  ]
+}

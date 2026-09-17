@@ -1,0 +1,30 @@
+{
+  "note": "物品内容入口。键是稳定 ID，name 可自由改名。category 分为 resource 基础资源、herb 药材、product 制品；具体品种与数值由作者填写，参见 docs/06-content-authoring.md。",
+  "items": {
+    "wood": {
+      "name": "木材",
+      "category": "resource",
+      "description": "基础资源，用于建筑与加工。"
+    },
+    "stone": {
+      "name": "石料",
+      "category": "resource",
+      "description": "基础资源，用于建筑与加工。"
+    },
+    "clearheart_grass": {
+      "name": "清心草",
+      "category": "herb",
+      "description": "用于降低压力的药材，与青蕴草是独立物种。"
+    },
+    "qingyun_grass": {
+      "name": "青蕴草",
+      "category": "herb",
+      "description": "基础药材，不属于基础资源。具体丹方用途由作者填写。"
+    },
+    "clearheart_pill": {
+      "name": "清心丹",
+      "category": "product",
+      "description": "加工减压制品。配方与使用效果为可调整的试作示例。"
+    }
+  }
+}

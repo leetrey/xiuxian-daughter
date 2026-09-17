@@ -1,217 +1,308 @@
 extends Node
 
-# GameState 是全局状态仓库，在 project.godot 中注册为 Autoload。
-# 其他脚本通过 GameState.xxx 读写同一份数据，因此切换场景也不会丢失进度。
-
-# 界面只监听信号，不需要每帧轮询状态：
-# - state_changed：数值发生变化，要求界面整体刷新。
-# - feedback_emitted：显示本次行动或月底结算的叙事反馈。
-# - game_ended：打开结局界面。
+# 本局状态只有一份；UI 读取它，ScheduleManager 提交培养与活动结果。
+# 尚未实现剧情、存档和继承选择，不保留旧月份和经验条逻辑。
 signal state_changed
-signal feedback_emitted(message: String, tone: String)
-signal game_ended(title: String, description: String)
+enum Phase { FREE, RESOLVING, RESULTS, FINISHED }
+const CONFIG_PATH := "res://data/cultivation.json"
+const CAVE_CONFIG_PATH := "res://data/cave.json"
+const ITEMS_PATH := "res://data/items.json"
+const RECIPES_PATH := "res://data/recipes.json"
+const Cave = preload("res://scripts/cave_rules.gd")
+const Content = preload("res://scripts/content_tables.gd")
 
-# 境界使用数组下标保存，例如 0 表示炼气、1 表示筑基。
-const REALM_NAMES := ["炼气", "筑基", "金丹", "元婴", "化神"]
-const MAX_MONTHS := 96
-
-# 时间状态。八年共 96 个行动月，女儿每跨过 12 个月增长一岁。
-var cycle_year := 1
-var month := 1
-var daughter_age := 10
-var elapsed_months := 0
-
-# 父女共享同一个精力槽和家庭库存。
-var max_energy := 10
-var energy := 10
-var spirit_stones := 120
-var herbs := 2
-
-# 父女各自拥有境界和修为进度，但行动时消耗上面的共享精力。
-var daughter_realm := 0
-var daughter_progress := 12
-var father_realm := 0
-var father_progress := 52
-
-# 原型先用四项聚合属性跑通玩法，后续可替换成 GDD 中的 16 项细分属性。
-var daughter_stats := {
-	"physique": 12,
-	"dao": 14,
-	"affinity": 11,
-	"arts": 8,
-}
-var bond := 50
-var heart_demon := 8
-
-# 两条隐藏轴相互独立：坦白真相不等于选择复仇。
-var vengeance := 35
-var truth_revealed := 5
-
-# 每月临时状态在 advance_month() 中重置。
-var sect_status := "尚未入门"
-var monthly_action_counts := {}
-var rest_used := false
-var action_history: Array[String] = []
-
-# 结局触发后锁住所有行动，并把结果交给界面展示。
-var game_finished := false
-var ending_title := ""
-var ending_description := ""
+var config: Dictionary = {}
+var cave_config: Dictionary = {}
+var config_error := ""
+var cave: Dictionary = {}
+var last_production: Dictionary = {}
+var last_production_turn := 0
+var base_stats: Dictionary = {}
+# 只预留三件装备的属性贡献口径；完整换装系统尚未实现。
+var equipment_bonuses: Dictionary = {}
+var inventory: Dictionary = {}
+var plan: Array[String] = []
+var last_results: Array[Dictionary] = []
+var phase := Phase.FREE
+var turn := 1
+var energy := 0
+var pressure := 0
+var schedule_slots := 3
+var rng := RandomNumberGenerator.new()
 
 
-func reset_game() -> void:
-	# 集中重置所有可变数据，确保“重新开始”和首次开局使用同一套初值。
-	cycle_year = 1
-	month = 1
-	daughter_age = 10
-	elapsed_months = 0
-	max_energy = 10
-	energy = max_energy
-	spirit_stones = 120
-	herbs = 2
-	daughter_realm = 0
-	daughter_progress = 12
-	father_realm = 0
-	father_progress = 52
-	daughter_stats = {"physique": 12, "dao": 14, "affinity": 11, "arts": 8}
-	bond = 50
-	heart_demon = 8
-	vengeance = 35
-	truth_revealed = 5
-	sect_status = "尚未入门"
-	monthly_action_counts.clear()
-	rest_used = false
-	action_history.clear()
-	game_finished = false
-	ending_title = ""
-	ending_description = ""
-	state_changed.emit()
-	feedback_emitted.emit("新的八年，从边城这间小屋开始。", "story")
-
-
-func advance_month() -> void:
-	# 月底结算顺序：家庭开销 -> 时间推进 -> 月度资源刷新 ->
-	# 固定剧情节点 -> 失败/结局判定 -> 通知界面。
-	if game_finished:
+func _ready() -> void:
+	config_error = _load_configs()
+	if not config_error.is_empty():
+		push_error(config_error)
+		get_tree().quit(1)
 		return
+	reset_game()
 
-	var notes: Array[String] = []
-	# 开销随年份缓慢增加，让父亲做工和资源经营始终有价值。
-	var upkeep := 30 + (cycle_year - 1) * 5
-	if spirit_stones >= upkeep:
-		spirit_stones -= upkeep
-		notes.append("本月家用支出 %d 灵石。" % upkeep)
+
+func _load_configs() -> String:
+	var sources: Dictionary = {}
+	for path in [CONFIG_PATH, CAVE_CONFIG_PATH, ITEMS_PATH, RECIPES_PATH]:
+		var result := Content.read_object(path)
+		if not str(result.error).is_empty():
+			return str(result.error)
+		sources[path] = result.data
+	config = sources[CONFIG_PATH]
+	cave_config = sources[CAVE_CONFIG_PATH]
+	if config.has("items"):
+		return "data/cultivation.json: 物品定义请放到 data/items.json，不能重复定义 items"
+	if cave_config.has("recipes"):
+		return "data/cave.json: 配方定义请放到 data/recipes.json，建筑中只保留配方 ID 列表"
+	if not sources[ITEMS_PATH].get("items") is Dictionary:
+		return "data/items.json items: 需要对象"
+	if not sources[RECIPES_PATH].get("recipes") is Dictionary:
+		return "data/recipes.json recipes: 需要对象"
+	# 文件按内容归属拆开，加载后沿用现有规则与 UI 的查询入口，不复制第二套物品状态。
+	config.items = sources[ITEMS_PATH].items
+	cave_config.recipes = sources[RECIPES_PATH].recipes
+	var error := validate_config()
+	return error if not error.is_empty() else validate_cave_config()
+
+
+func validate_config() -> String:
+	for key in ["rules", "groups", "items", "initial_inventory"]:
+		if not config.get(key) is Dictionary:
+			return "配置缺少对象: " + key
+	for key in ["activities", "outcomes", "pressure_bands"]:
+		if not config.get(key) is Array:
+			return "配置缺少数组: " + key
+	var content_error := Content.validate_items(config.items)
+	if not content_error.is_empty():
+		return content_error
+	content_error = Content.validate_amounts(config.initial_inventory, config.items, "data/cultivation.json initial_inventory")
+	if not content_error.is_empty():
+		return content_error
+	var rules: Dictionary = config.rules
+	if int(rules.get("schedule_slots", 0)) < 3 or int(rules.get("schedule_slots", 0)) > 5:
+		return "培养槽数量必须为 3 至 5"
+	if not rules.get("phase_turns") is Array or rules.phase_turns.size() != 3:
+		return "必须配置三个成长阶段"
+	for length in rules.phase_turns:
+		if int(length) <= 0:
+			return "阶段回合数必须为正数"
+	if int(rules.get("max_energy", -1)) < 0 or int(rules.get("initial_attribute", -1)) < 0:
+		return "精力与初始属性不能为负"
+	if not ["round", "floor"].has(rules.get("rounding", "")):
+		return "取整只支持 round 或 floor"
+	var names := stat_names()
+	if names.size() != 16:
+		return "需要 16 项细分属性"
+	if config.outcomes.size() != 3:
+		return "需要大成功、成功、失败三种结果"
+	var boundary := 0
+	for band in config.pressure_bands:
+		if int(band.min) != boundary or int(band.max_exclusive) <= boundary:
+			return "压力区间必须连续且不能重叠"
+		boundary = int(band.max_exclusive)
+		if band.probabilities.size() != config.outcomes.size():
+			return "结果与概率数量不一致"
+		var total := 0.0
+		for probability in band.probabilities:
+			if float(probability) < 0.0:
+				return "概率不能为负数"
+			total += float(probability)
+		if not is_equal_approx(total, 1.0):
+			return "每档概率之和必须为 1"
+	if boundary != 101:
+		return "压力区间必须覆盖 0 至 100"
+	var ids: Array[String] = []
+	for activity in config.activities:
+		if not activity is Dictionary or not activity.get("id") is String or str(activity.id).is_empty():
+			return "data/cultivation.json activities: 每项活动需要非空 id"
+		var path := "data/cultivation.json activities." + str(activity.id)
+		if not activity.get("name") is String or str(activity.name).strip_edges().is_empty():
+			return path + ".name: 需要非空名称"
+		if not activity.get("growth") is Dictionary or not (activity.get("pressure") is int or activity.get("pressure") is float):
+			return path + ": 需要 growth 对象与 pressure 数值"
+		if ids.has(str(activity.id)) or not ["schedule", "free"].has(activity.get("kind")):
+			return "活动 ID 重复或类型错误"
+		ids.append(str(activity.id))
+		if int(activity.get("energy_cost", 0)) < 0:
+			return "活动精力成本不能为负"
+		for key in activity.growth:
+			if not names.has(key) or float(activity.growth[key]) < 0:
+				return "活动成长引用了未知属性或负数: " + str(key)
+		content_error = Content.validate_amounts(activity.get("costs", {}), config.items, path + ".costs")
+		if not content_error.is_empty():
+			return content_error
+	return ""
+
+
+func reset_game(random_seed: int = -1) -> void:
+	base_stats.clear()
+	for key in stat_names():
+		base_stats[key] = int(config.rules.initial_attribute)
+	equipment_bonuses = {"weapon": {}, "armor": {}, "accessory": {}}
+	inventory = config.initial_inventory.duplicate(true)
+	schedule_slots = int(config.rules.schedule_slots)
+	turn = 1
+	phase = Phase.FREE
+	energy = int(config.rules.max_energy)
+	pressure = clampi(int(config.rules.initial_pressure), 0, 100)
+	plan.clear()
+	plan.resize(schedule_slots)
+	plan.fill("")
+	last_results.clear()
+	cave = {"roads": [], "buildings": [], "workers": [], "next_id": 1}
+	for cell in cave_config.initial_roads:
+		cave.roads.append(Vector2i(int(cell[0]), int(cell[1])))
+	for source in cave_config.workers:
+		var worker: Dictionary = source.duplicate(true)
+		worker.building_id = -1
+		worker.slot = -1
+		cave.workers.append(worker)
+	last_production.clear()
+	last_production_turn = 0
+	if random_seed < 0:
+		rng.randomize()
 	else:
-		spirit_stones = 0
-		heart_demon = mini(100, heart_demon + 8)
-		notes.append("家用不足，她看出了你的窘迫，心魔有所增长。")
-
-	elapsed_months += 1
-	month += 1
-	if month > 12:
-		month = 1
-		cycle_year += 1
-		daughter_age += 1
-		notes.append("她迎来了 %d 岁的生辰。" % daughter_age)
-
-	energy = max_energy
-	monthly_action_counts.clear()
-	rest_used = false
-
-	# 第三年山门试炼失败不会截断主线，而是进入收入较低的杂役路线。
-	if cycle_year == 3 and month == 1:
-		if daughter_realm >= 1:
-			sect_status = "外门弟子"
-			notes.append("她通过山门试炼，正式成为外门弟子。")
-		else:
-			sect_status = "杂役弟子"
-			notes.append("她未能通过试炼，暂以杂役弟子的身份留在宗门。")
-	elif cycle_year >= 3 and sect_status != "尚未入门":
-		var stipend := 18 if sect_status == "杂役弟子" else 32
-		spirit_stones += stipend
-		notes.append("宗门发下 %d 灵石月例。" % stipend)
-
-	# 道陨是即时失败，所以必须早于八年期满的普通结局判定。
-	if heart_demon >= 100:
-		finish_ending("道陨", "执念吞没了道心。山中长风依旧，她却没能走出这一劫。")
-		return
-
-	if elapsed_months >= MAX_MONTHS:
-		_determine_ending()
-		return
-
+		rng.seed = random_seed
 	state_changed.emit()
-	feedback_emitted.emit(_join_lines(notes), "month")
 
 
-func finish_ending(title: String, description: String) -> void:
-	# 所有结局都从这个入口收束，避免各系统分别操作结局界面。
-	game_finished = true
-	ending_title = title
-	ending_description = description
-	state_changed.emit()
-	game_ended.emit(title, description)
+func validate_cave_config() -> String:
+	for key in ["buildings", "recipes"]:
+		if not cave_config.get(key) is Dictionary or cave_config[key].is_empty():
+			return "洞天配置缺少非空对象: " + key
+	var content_error := Content.validate_recipes(cave_config.recipes, config.items)
+	if not content_error.is_empty():
+		return content_error
+	for key in ["entrance", "initial_roads", "workers"]:
+		if not cave_config.get(key) is Array:
+			return "洞天配置缺少数组: " + key
+	if cave_config.entrance.size() != 2:
+		return "入口需要两个坐标"
+	if int(cave_config.get("width", 0)) < 1 or int(cave_config.get("height", 0)) < 1:
+		return "洞天尺寸必须为正数"
+	if not ["manhattan", "chebyshev"].has(cave_config.get("distance_metric", "")):
+		return "景观距离只支持 manhattan 或 chebyshev"
+	if not ["round", "floor"].has(cave_config.get("output_rounding", "")):
+		return "洞天取整只支持 round 或 floor"
+	if not Cave.inside(Cave.entrance()):
+		return "入口必须在洞天内"
+	var seen: Array[Vector2i] = []
+	for point in cave_config.initial_roads:
+		if not point is Array or point.size() != 2:
+			return "道路需要两个坐标"
+		var cell := Vector2i(int(point[0]), int(point[1]))
+		if not Cave.inside(cell) or seen.has(cell) or cell == Cave.entrance():
+			return "初始道路越界或重复"
+		seen.append(cell)
+	for building_id in cave_config.buildings:
+		var building = cave_config.buildings[building_id]
+		var path := "data/cave.json buildings." + str(building_id)
+		if not building is Dictionary:
+			return path + ": 建筑必须为对象"
+		if not building.get("size") is Array or building.size.size() != 2:
+			return "建筑占地需要宽高两个值"
+		if not building.get("costs") is Dictionary or not building.get("recipes") is Array:
+			return "建筑缺少成本或配方列表"
+		if not ["housing", "production", "manufacturing", "landscape"].has(building.get("category", "")):
+			return "建筑分类不合法"
+		if str(building.get("name", "")).is_empty() or not building.has("color") or not building.has("worker_slots"):
+			return "建筑缺少名称、颜色或工作槽"
+		if int(building.size[0]) < 1 or int(building.size[1]) < 1 or int(building.worker_slots) < 0 or int(building.worker_slots) > 3:
+			return "建筑尺寸或工作槽不合法"
+		if int(building.get("capacity", 0)) < 0:
+			return "民居容量不能为负数"
+		content_error = Content.validate_amounts(building.costs, config.items, path + ".costs")
+		if not content_error.is_empty():
+			return content_error
+		content_error = Content.validate_building_recipes(building, cave_config.recipes, config.items, path)
+		if not content_error.is_empty():
+			return content_error
+		if building.has("bonus"):
+			var bonus = building.bonus
+			if not bonus is Dictionary or not bonus.get("work_types") is Array:
+				return "景观缺少适用工作类型"
+			if str(bonus.get("affix", "")).is_empty() or str(bonus.get("label", "")).is_empty():
+				return "景观缺少词条 ID 或名称"
+			if float(bonus.get("radius", 0)) <= 0 or float(bonus.get("peak", -1)) < 0:
+				return "景观半径和倍率不合法"
+	var worker_ids: Array[String] = []
+	for worker in cave_config.workers:
+		if not worker is Dictionary or not worker.get("aptitudes") is Dictionary:
+			return "御灵缺少适应性对象"
+		if str(worker.get("id", "")).is_empty() or str(worker.get("name", "")).is_empty():
+			return "御灵缺少 ID 或名称"
+		if worker_ids.has(str(worker.id)):
+			return "御灵 ID 重复"
+		worker_ids.append(str(worker.id))
+		for value in worker.aptitudes.values():
+			if float(value) < 0:
+				return "适应性不能为负数"
+	return ""
 
 
-func daughter_realm_name() -> String:
-	return REALM_NAMES[daughter_realm]
+func cost_error(costs: Dictionary, stock: Dictionary) -> String:
+	for key in costs:
+		if int(stock.get(key, 0)) < int(costs[key]):
+			return str(config.items[key].name) + "不足"
+	return ""
 
 
-func father_realm_name() -> String:
-	return REALM_NAMES[father_realm]
+func pay_costs(costs: Dictionary) -> void:
+	for key in costs:
+		inventory[key] = int(inventory.get(key, 0)) - int(costs[key])
 
 
-func vengeance_descriptor() -> String:
-	# 隐藏数值不直接显示，只向玩家提供有叙事意味的区间描述。
-	if vengeance >= 70:
-		return "决意追索"
-	if vengeance >= 45:
-		return "难平旧恨"
-	if vengeance >= 20:
-		return "克制观望"
-	return "愿放旧事"
+func stat_names() -> Dictionary:
+	var names: Dictionary = {}
+	for group in config.groups.values():
+		names.merge(group.stats)
+	return names
 
 
-func truth_descriptor() -> String:
-	if truth_revealed >= 75:
-		return "真相已明"
-	if truth_revealed >= 45:
-		return "旧事渐显"
-	if truth_revealed >= 15:
-		return "察觉隐情"
-	return "身世深埋"
+func equipment_bonus(stat: String) -> int:
+	var value := 0
+	for bonuses in equipment_bonuses.values():
+		value += int(bonuses.get(stat, 0))
+	return value
 
 
-func register_action(action_id: String) -> void:
-	# 次数用于计算同月重复行动的收益衰减；历史记录为后续事件系统预留。
-	monthly_action_counts[action_id] = int(monthly_action_counts.get(action_id, 0)) + 1
-	action_history.append(action_id)
-	if action_history.size() > 24:
-		action_history.pop_front()
+func attribute(stat: String, with_equipment: bool = false) -> int:
+	# 剧情默认只取 A；比赛显式传 true，换装不能写入永久成长。
+	return int(base_stats.get(stat, 0)) + (equipment_bonus(stat) if with_equipment else 0)
 
 
-func _determine_ending() -> void:
-	# 从上到下就是结局优先级，先匹配成功的分支立即结束判定。
-	if heart_demon >= 100:
-		finish_ending("道陨", "执念吞没了道心。")
-	elif daughter_realm >= 4:
-		finish_ending("飞升", "她越过化神天关，终于看见群山之外的天光。")
-	elif vengeance >= 70 and daughter_realm >= 2:
-		finish_ending("复仇雪恨", "旧案昭雪，但她选择如何记住这段血色岁月。")
-	elif vengeance < 30 and truth_revealed >= 65 and bond >= 70:
-		finish_ending("重建宗门", "你们以真相为基，重新点亮了青云宗的山门。")
-	elif vengeance < 30 and bond >= 75:
-		finish_ending("归隐", "你们没有回头，只在青山深处守住寻常岁月。")
-	elif daughter_stats["arts"] >= 75:
-		finish_ending("百艺通明", "她以手中技艺，在仙途上写下了自己的名字。")
+func group_total(group_id: String, with_equipment: bool = false) -> int:
+	var value := 0
+	for key in config.groups[group_id].stats:
+		value += attribute(key, with_equipment)
+	return value
+
+
+func growth_phase() -> int:
+	var boundary := 0
+	for i in range(config.rules.phase_turns.size()):
+		boundary += int(config.rules.phase_turns[i])
+		if turn <= boundary:
+			return i
+	return 2
+
+
+func total_turns() -> int:
+	var total := 0
+	for length in config.rules.phase_turns:
+		total += int(length)
+	return total
+
+
+func advance_turn() -> bool:
+	if phase != Phase.RESULTS:
+		return false
+	if turn >= total_turns():
+		phase = Phase.FINISHED
 	else:
-		finish_ending("散修", "她不依山门，不循旧路，从此自在行走天地。")
-
-
-func _join_lines(lines: Array[String]) -> String:
-	var result := ""
-	for line in lines:
-		if not result.is_empty():
-			result += "\n"
-		result += line
-	return result
+		turn += 1
+		energy = int(config.rules.max_energy)
+		plan.fill("")
+		phase = Phase.FREE
+		# 压力不在此恢复；未来回合末天赋应在独立结算位置执行。
+	state_changed.emit()
+	return true

@@ -16,7 +16,7 @@ ScheduleManager="*res://scripts/schedule_manager.gd"
 
 [display]
 
-; 1280x720 是 640x360 像素美术基准的 2 倍整数缩放。
+; 以 1280x720 为桌面布局基准，扩大视口时保留场景与边缘 HUD。
 window/size/viewport_width=1280
 window/size/viewport_height=720
 window/size/window_width_override=1280
@@ -26,7 +26,7 @@ window/stretch/aspect="expand"
 
 [rendering]
 
-; Compatibility 渲染器覆盖面较广，nearest 过滤保持像素素材边缘清晰。
+; Compatibility 渲染器覆盖面较广；场景界面自行使用线性采样。
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
 textures/default_filters/use_nearest_mipmap_filter=false

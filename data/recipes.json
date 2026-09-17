@@ -1,0 +1,30 @@
+{
+  "note": "种植、采集与加工共用配方表。inputs/outputs 的键引用 items.json，数量为每栋建筑每回合一批的整数。这里只放可运行示例，不代表正式丹方或剧情解锁。",
+  "recipes": {
+    "grow_clearheart": {
+      "name": "种植清心草",
+      "inputs": {},
+      "outputs": {"clearheart_grass": 4}
+    },
+    "grow_qingyun": {
+      "name": "种植青蕴草",
+      "inputs": {},
+      "outputs": {"qingyun_grass": 4}
+    },
+    "gather_wood": {
+      "name": "采集木材",
+      "inputs": {},
+      "outputs": {"wood": 4}
+    },
+    "gather_stone": {
+      "name": "开采石料",
+      "inputs": {},
+      "outputs": {"stone": 4}
+    },
+    "make_clearheart": {
+      "name": "炼制清心丹",
+      "inputs": {"clearheart_grass": 4},
+      "outputs": {"clearheart_pill": 2}
+    }
+  }
+}

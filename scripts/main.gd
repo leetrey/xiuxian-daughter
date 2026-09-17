@@ -1,577 +1,596 @@
 extends Control
 
-# Main 是“表现层”：创建控件、收集玩家输入、把 GameState 渲染到界面。
-# 它不直接计算行动收益，所有规则都交给 ScheduleManager，便于以后换 UI。
-
-# 原型主题色集中定义，构建控件时复用，避免颜色散落在各函数中。
-const COLOR_PAPER := Color("f4f0e5")
-const COLOR_MUTED := Color("aeb9b0")
-const COLOR_JADE := Color("65a875")
-const COLOR_GOLD := Color("d1a657")
-const COLOR_RED := Color("bf6259")
-const COLOR_PANEL := Color("17231fe8")
-const COLOR_PANEL_LIGHT := Color("22312bea")
-
-# 下列引用在构建 UI 时赋值，之后由刷新和交互函数统一使用。
-var activity_grid: GridContainer
-var queue_flow: HFlowContainer
-var queue_label: Label
-var execute_button: Button
-var undo_button: Button
-var next_month_button: Button
-
-var time_label: Label
+# 场景与菜单只提交选择并展示结果，不在刷新时掷骰、扣费或增加属性。
+const ThemeKit = preload("res://scripts/ui_theme.gd")
+const TEXT := ThemeKit.INK
+const MUTED := ThemeKit.MUTED
+const ACCENT := ThemeKit.JADE
+var selectors: Array[OptionButton] = []
+var slot_details: Array[Label] = []
+var slot_tools: Array[Button] = []
+var free_buttons: Dictionary = {}
+var stat_labels: Dictionary = {}
+var group_labels: Dictionary = {}
+var summary_labels: Dictionary = {}
 var energy_label: Label
-var resource_label: Label
-var daughter_realm_label: Label
-var daughter_progress: ProgressBar
-var father_realm_label: Label
-var father_progress: ProgressBar
-var stat_labels := {}
-var bond_label: Label
-var heart_label: Label
-var stance_label: Label
-var feedback_label: RichTextLabel
-var sect_label: Label
-
-# 日程队列只存行动 id，不提前改变 GameState；按“执行”后才真正结算。
-var scheduled_actions: Array[String] = []
-var activity_buttons := {}
-var ending_overlay: ColorRect
-var ending_title_label: Label
-var ending_description_label: Label
+var pressure_label: Label
+var pressure_bar: ProgressBar
+var status_label: Label
+var notice: Label
+var results: RichTextLabel
+var planning: VBoxContainer
+var journal: VBoxContainer
+var schedule_scroll: ScrollContainer
+var confirm_button: Button
+var next_button: Button
+var schedule_button: Button
+var home_button: Button
+var location_label: Label
+var cave_view: Control
+var home: Control
+var portrait: TextureRect
+var portrait_stage := -1
+var idle_dialog: ConfirmationDialog
+var overlay: Control
+var modal: PanelContainer
+var modal_title: Label
+var work_page: VBoxContainer
+var attributes_page: ScrollContainer
+var activities_page: ScrollContainer
+var active_menu := ""
+var in_cave := false
+var elapsed := 0.0
+var portrait_origin := Vector2.ZERO
 
 
 func _ready() -> void:
-	# 先创建界面，再连接全局信号，最后执行一次初始渲染。
-	# 信号连接让规则层和界面层解耦：规则只广播“状态变了”。
-	theme = _build_theme()
-	_build_interface()
+	if not GameState.config_error.is_empty():
+		return
+	theme = ThemeKit.make_theme()
+	get_window().min_size = Vector2i(960, 540)
+	texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
+	home = Control.new()
+	home.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	add_child(home)
+	var backdrop := TextureRect.new()
+	backdrop.texture = load("res://assets/home_courtyard.png")
+	backdrop.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	backdrop.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+	backdrop.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	backdrop.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	home.add_child(backdrop)
+	portrait = TextureRect.new()
+	portrait.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	portrait.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	portrait.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	portrait.tooltip_text = "宁宁"
+	portrait.gui_input.connect(func(event: InputEvent) -> void:
+		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+			open_menu("attributes"))
+	home.add_child(portrait)
+	_build_home_summary()
+	cave_view = load("res://scenes/cave.tscn").instantiate()
+	cave_view.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	add_child(cave_view)
+	cave_view.hide()
+	_build_hud()
+	_build_overlay()
+	idle_dialog = ConfirmationDialog.new()
+	idle_dialog.title = "生产安排"
+	idle_dialog.ok_button_text = "仍然结算"
+	idle_dialog.cancel_button_text = "返回洞天"
+	idle_dialog.confirmed.connect(_confirm_ignoring_idle)
+	idle_dialog.canceled.connect(show_cave)
+	add_child(idle_dialog)
+	resized.connect(_layout)
 	GameState.state_changed.connect(_refresh)
-	GameState.feedback_emitted.connect(_show_feedback)
-	GameState.game_ended.connect(_show_ending)
 	_refresh()
-	_show_feedback("她把第一本吐纳诀放在膝上，等你开口。", "story")
+	_layout()
 
 
-func _build_interface() -> void:
-	# 画面按添加顺序从底到顶分为：兜底色、背景图、暗色遮罩、交互界面。
-	# 即使背景素材暂时缺失，兜底色也能保证界面可读。
-	var fallback := ColorRect.new()
-	fallback.color = Color("314c40")
-	fallback.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	add_child(fallback)
-
-	var background := TextureRect.new()
-	background.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	background.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	background.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
-	background.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	if ResourceLoader.exists("res://assets/cultivation_home.png"):
-		background.texture = load("res://assets/cultivation_home.png")
-	add_child(background)
-
-	# 遮罩压低背景对比度，避免背景细节影响按钮和文字辨识。
-	var veil := ColorRect.new()
-	veil.color = Color("0c1611a8")
-	veil.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	veil.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(veil)
-
-	var margin := MarginContainer.new()
-	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	margin.add_theme_constant_override("margin_left", 26)
-	margin.add_theme_constant_override("margin_right", 26)
-	margin.add_theme_constant_override("margin_top", 22)
-	margin.add_theme_constant_override("margin_bottom", 22)
-	add_child(margin)
-
-	# 页面纵向分成顶部资源栏、中部内容区、底部日程栏。
-	var page := VBoxContainer.new()
-	page.add_theme_constant_override("separation", 14)
-	margin.add_child(page)
-	page.add_child(_build_header())
-	page.add_child(_build_content())
-	page.add_child(_build_schedule_bar())
-	_build_ending_overlay()
-
-
-func _build_header() -> Control:
-	# 顶栏只展示全局概览：时间、共享精力和家庭资源。
+func _build_home_summary() -> void:
 	var panel := PanelContainer.new()
-	panel.custom_minimum_size.y = 72
-	panel.add_theme_stylebox_override("panel", _panel_style(COLOR_PANEL, 6, Color("66827090"), 1))
+	panel.position = Vector2(28, 116)
+	panel.custom_minimum_size.x = 206
+	panel.add_theme_stylebox_override("panel", ThemeKit.hud_panel(18))
+	home.add_child(panel)
+	var column := VBoxContainer.new()
+	column.add_theme_constant_override("separation", 14)
+	panel.add_child(column)
+	var name_label := _label("宁宁", 30, ThemeKit.LIGHT)
+	name_label.add_theme_font_override("font", ThemeKit.title_font())
+	column.add_child(name_label)
+	for group_id in GameState.config.groups:
+		var row := HBoxContainer.new()
+		var name_text := _label(str(GameState.config.groups[group_id].name), 17, ThemeKit.GOLD)
+		name_text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row.add_child(name_text)
+		var amount := _label("", 22, ThemeKit.LIGHT)
+		amount.custom_minimum_size.x = 70
+		amount.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		amount.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+		row.add_child(amount)
+		summary_labels[group_id] = amount
+		column.add_child(row)
+	var details_button := _button("人物详情")
+	details_button.icon = ThemeKit.icon("users")
+	ThemeKit.game_button(details_button)
+	details_button.pressed.connect(open_menu.bind("attributes"))
+	column.add_child(details_button)
 
-	var margin := MarginContainer.new()
-	margin.add_theme_constant_override("margin_left", 18)
-	margin.add_theme_constant_override("margin_right", 18)
-	margin.add_theme_constant_override("margin_top", 10)
-	margin.add_theme_constant_override("margin_bottom", 10)
-	panel.add_child(margin)
 
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 18)
-	margin.add_child(row)
-
-	var brand := VBoxContainer.new()
-	brand.custom_minimum_size.x = 300
-	brand.add_theme_constant_override("separation", 0)
-	brand.add_child(_make_label("山河养成录", 28, COLOR_PAPER))
-	brand.add_child(_make_label("青云旧事 · 原型章", 13, COLOR_MUTED))
-	row.add_child(brand)
-
+func _build_hud() -> void:
+	var header := HBoxContainer.new()
+	header.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	header.offset_left = 28
+	header.offset_right = -28
+	header.offset_top = 24
+	header.offset_bottom = 80
+	header.add_theme_constant_override("separation", 12)
+	add_child(header)
+	home_button = _button("")
+	home_button.icon = ThemeKit.icon("house")
+	home_button.tooltip_text = "返回山居"
+	home_button.custom_minimum_size = Vector2(52, 52)
+	ThemeKit.game_button(home_button)
+	home_button.pressed.connect(show_home)
+	header.add_child(home_button)
+	location_label = _label("山居", 32, ThemeKit.LIGHT)
+	location_label.add_theme_font_override("font", ThemeKit.title_font())
+	location_label.add_theme_color_override("font_shadow_color", Color("#294735"))
+	location_label.add_theme_constant_override("shadow_offset_y", 2)
+	header.add_child(location_label)
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_child(spacer)
-	time_label = _make_label("", 17, COLOR_PAPER)
-	time_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	row.add_child(time_label)
-	energy_label = _make_label("", 17, COLOR_GOLD)
-	energy_label.custom_minimum_size.x = 128
-	energy_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	row.add_child(energy_label)
-	resource_label = _make_label("", 16, COLOR_PAPER)
-	resource_label.custom_minimum_size.x = 180
-	resource_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	row.add_child(resource_label)
-	return panel
+	header.add_child(spacer)
+	var vitals := PanelContainer.new()
+	vitals.add_theme_stylebox_override("panel", ThemeKit.hud_panel(12))
+	header.add_child(vitals)
+	var vitals_row := HBoxContainer.new()
+	vitals_row.add_theme_constant_override("separation", 28)
+	vitals.add_child(vitals_row)
+	energy_label = _label("", 17, ThemeKit.LIGHT)
+	vitals_row.add_child(energy_label)
+	var pressure_column := VBoxContainer.new()
+	pressure_column.custom_minimum_size.x = 130
+	vitals_row.add_child(pressure_column)
+	pressure_label = _label("", 15, ThemeKit.LIGHT)
+	pressure_column.add_child(pressure_label)
+	pressure_bar = ProgressBar.new()
+	pressure_bar.custom_minimum_size.y = 5
+	pressure_bar.show_percentage = false
+	pressure_bar.add_theme_stylebox_override("fill", ThemeKit.panel(Color("#e2b499"), Color.TRANSPARENT, 0, 0))
+	pressure_bar.add_theme_stylebox_override("background", ThemeKit.panel(Color("#52665a"), Color.TRANSPARENT, 0, 0))
+	pressure_column.add_child(pressure_bar)
+	var bottom := HBoxContainer.new()
+	bottom.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
+	bottom.offset_left = 28
+	bottom.offset_right = -28
+	bottom.offset_top = -88
+	bottom.offset_bottom = -24
+	bottom.add_theme_constant_override("separation", 12)
+	add_child(bottom)
+	var activities_button := _button("自由活动")
+	activities_button.icon = ThemeKit.icon("leaf")
+	activities_button.custom_minimum_size.x = 170
+	ThemeKit.game_button(activities_button)
+	activities_button.pressed.connect(open_menu.bind("activities"))
+	bottom.add_child(activities_button)
+	var cave_button := _button("洞天")
+	cave_button.icon = ThemeKit.icon("mountain")
+	cave_button.custom_minimum_size.x = 142
+	ThemeKit.game_button(cave_button)
+	cave_button.pressed.connect(show_cave)
+	bottom.add_child(cave_button)
+	var space := Control.new()
+	space.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	bottom.add_child(space)
+	schedule_button = _button("安排日程")
+	schedule_button.icon = ThemeKit.icon("arrow-right")
+	schedule_button.custom_minimum_size.x = 240
+	ThemeKit.game_button(schedule_button, true)
+	schedule_button.pressed.connect(open_menu.bind("work"))
+	bottom.add_child(schedule_button)
+	# 自由行动反馈贴在场景上，不伪装成尚未实现的剧情对话。
+	notice = _label("", 17, ThemeKit.LIGHT)
+	notice.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
+	notice.offset_left = 28
+	notice.offset_right = -28
+	notice.offset_top = -135
+	notice.offset_bottom = -100
+	notice.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	notice.add_theme_stylebox_override("normal", ThemeKit.hud_panel(8))
+	notice.hide()
+	add_child(notice)
 
 
-func _build_content() -> Control:
-	# 中部左侧是可滚动行动列表，右侧是父女状态与本月札记。
-	var row := HBoxContainer.new()
-	row.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	row.add_theme_constant_override("separation", 14)
-
-	var actions_panel := PanelContainer.new()
-	actions_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	actions_panel.add_theme_stylebox_override("panel", _panel_style(COLOR_PANEL, 6, Color("66827070"), 1))
-	row.add_child(actions_panel)
-
-	var actions_margin := MarginContainer.new()
-	actions_margin.add_theme_constant_override("margin_left", 18)
-	actions_margin.add_theme_constant_override("margin_right", 18)
-	actions_margin.add_theme_constant_override("margin_top", 15)
-	actions_margin.add_theme_constant_override("margin_bottom", 15)
-	actions_panel.add_child(actions_margin)
-
-	var actions_column := VBoxContainer.new()
-	actions_column.add_theme_constant_override("separation", 10)
-	actions_margin.add_child(actions_column)
-	var actions_heading := HBoxContainer.new()
-	actions_heading.add_child(_make_label("安排本月行动", 22, COLOR_PAPER))
-	var actions_heading_spacer := Control.new()
-	actions_heading_spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	actions_heading.add_child(actions_heading_spacer)
-	actions_heading.add_child(_make_label("重复行动收益递减", 13, COLOR_MUTED))
-	actions_column.add_child(actions_heading)
-	var rule := HSeparator.new()
-	rule.modulate = Color("66827090")
-	actions_column.add_child(rule)
-
-	var scroll := ScrollContainer.new()
-	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	actions_column.add_child(scroll)
-	activity_grid = GridContainer.new()
-	activity_grid.columns = 2
-	activity_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	activity_grid.add_theme_constant_override("h_separation", 10)
-	activity_grid.add_theme_constant_override("v_separation", 10)
-	scroll.add_child(activity_grid)
-	_build_activity_buttons()
-	row.add_child(_build_status_panel())
-	return row
-
-
-func _build_activity_buttons() -> void:
-	# 按 ACTIVITIES 数据自动生成按钮。以后增加行动时无需手写新的 UI 节点。
-	for activity in ScheduleManager.get_activities():
-		var button := Button.new()
-		button.custom_minimum_size = Vector2(310, 78)
-		button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		button.alignment = HORIZONTAL_ALIGNMENT_LEFT
-		button.add_theme_font_size_override("font_size", 16)
-		button.add_theme_color_override("font_color", COLOR_PAPER)
-		button.add_theme_color_override("font_disabled_color", Color("89928d"))
-		button.add_theme_stylebox_override("normal", _panel_style(Color("26362fef"), 5, Color(activity["accent"] + "88"), 1))
-		button.add_theme_stylebox_override("hover", _panel_style(Color("31483cef"), 5, Color(activity["accent"]), 1))
-		button.add_theme_stylebox_override("pressed", _panel_style(Color("1d2d27f4"), 5, COLOR_GOLD, 2))
-		button.add_theme_stylebox_override("disabled", _panel_style(Color("202823d9"), 5, Color("58615d70"), 1))
-		# bind 把当前 action_id 固定到回调中，所有按钮共用同一个处理函数。
-		button.pressed.connect(_queue_activity.bind(activity["id"]))
-		activity_grid.add_child(button)
-		activity_buttons[activity["id"]] = button
-
-
-func _build_status_panel() -> Control:
-	# 状态面板把数值拆成女儿成长、父亲重修、关系/剧情三块。
-	var panel := PanelContainer.new()
-	panel.custom_minimum_size.x = 390
-	panel.add_theme_stylebox_override("panel", _panel_style(COLOR_PANEL_LIGHT, 6, Color("66827070"), 1))
-	var margin := MarginContainer.new()
-	margin.add_theme_constant_override("margin_left", 18)
-	margin.add_theme_constant_override("margin_right", 18)
-	margin.add_theme_constant_override("margin_top", 15)
-	margin.add_theme_constant_override("margin_bottom", 15)
-	panel.add_child(margin)
-
+func _build_overlay() -> void:
+	overlay = Control.new()
+	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	add_child(overlay)
+	var shade := ColorRect.new()
+	shade.color = Color(0.07, 0.16, 0.13, 0.38)
+	shade.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	shade.gui_input.connect(func(event: InputEvent) -> void:
+		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+			close_menu())
+	overlay.add_child(shade)
+	modal = PanelContainer.new()
+	modal.add_theme_stylebox_override("panel", ThemeKit.panel(Color("#f3f5ed"), ThemeKit.GOLD, 24, 3))
+	overlay.add_child(modal)
 	var column := VBoxContainer.new()
-	column.add_theme_constant_override("separation", 8)
-	margin.add_child(column)
-	var daughter_header := HBoxContainer.new()
-	daughter_header.add_child(_make_label("宁宁", 24, COLOR_PAPER))
-	var daughter_header_spacer := Control.new()
-	daughter_header_spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	daughter_header.add_child(daughter_header_spacer)
-	sect_label = _make_label("", 13, COLOR_GOLD)
-	daughter_header.add_child(sect_label)
-	column.add_child(daughter_header)
-	daughter_realm_label = _make_label("", 16, Color("c8e0cf"))
-	column.add_child(daughter_realm_label)
-	daughter_progress = _make_progress(COLOR_JADE)
-	column.add_child(daughter_progress)
-
-	var stats_grid := GridContainer.new()
-	stats_grid.columns = 2
-	stats_grid.add_theme_constant_override("h_separation", 12)
-	stats_grid.add_theme_constant_override("v_separation", 5)
-	for stat in [["physique", "体魄"], ["dao", "道法"], ["affinity", "仙缘"], ["arts", "杂学"]]:
-		var stat_label := _make_label("", 15, COLOR_PAPER)
-		stats_grid.add_child(stat_label)
-		stat_labels[stat[0]] = {"label": stat_label, "name": stat[1]}
-	column.add_child(stats_grid)
-
-	var divider_one := HSeparator.new()
-	divider_one.modulate = Color("66827080")
-	column.add_child(divider_one)
-	father_realm_label = _make_label("", 16, Color("c8dbe0"))
-	column.add_child(father_realm_label)
-	father_progress = _make_progress(Color("68a3af"))
-	column.add_child(father_progress)
-	var divider_two := HSeparator.new()
-	divider_two.modulate = Color("66827080")
-	column.add_child(divider_two)
-
-	bond_label = _make_label("", 15, COLOR_PAPER)
-	heart_label = _make_label("", 15, COLOR_PAPER)
-	stance_label = _make_label("", 14, COLOR_MUTED)
-	stance_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	column.add_child(bond_label)
-	column.add_child(heart_label)
-	column.add_child(stance_label)
-
-	var feedback_panel := PanelContainer.new()
-	feedback_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	feedback_panel.add_theme_stylebox_override("panel", _panel_style(Color("111c18cc"), 4, Color("526b5f80"), 1))
-	column.add_child(feedback_panel)
-	var feedback_margin := MarginContainer.new()
-	feedback_margin.add_theme_constant_override("margin_left", 12)
-	feedback_margin.add_theme_constant_override("margin_right", 12)
-	feedback_margin.add_theme_constant_override("margin_top", 10)
-	feedback_margin.add_theme_constant_override("margin_bottom", 10)
-	feedback_panel.add_child(feedback_margin)
-	feedback_label = RichTextLabel.new()
-	feedback_label.bbcode_enabled = true
-	feedback_label.fit_content = false
-	feedback_label.scroll_active = true
-	feedback_label.add_theme_font_size_override("normal_font_size", 15)
-	feedback_label.add_theme_color_override("default_color", COLOR_PAPER)
-	feedback_margin.add_child(feedback_label)
-	return panel
+	column.add_theme_constant_override("separation", 16)
+	modal.add_child(column)
+	var heading := HBoxContainer.new()
+	modal_title = _label("", 28)
+	modal_title.add_theme_font_override("font", ThemeKit.title_font())
+	modal_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	heading.add_child(modal_title)
+	var close := _button("")
+	close.icon = ThemeKit.icon("x")
+	close.tooltip_text = "收起"
+	close.custom_minimum_size = Vector2(42, 42)
+	close.pressed.connect(close_menu)
+	heading.add_child(close)
+	column.add_child(heading)
+	work_page = VBoxContainer.new()
+	work_page.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	work_page.add_theme_constant_override("separation", 12)
+	column.add_child(work_page)
+	_build_work(work_page)
+	attributes_page = _scroll_page(column)
+	var attributes := VBoxContainer.new()
+	attributes.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	attributes.add_theme_constant_override("separation", 18)
+	attributes_page.add_child(attributes)
+	_build_attributes(attributes)
+	activities_page = _scroll_page(column)
+	var activities := VBoxContainer.new()
+	activities.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	activities.add_theme_constant_override("separation", 16)
+	activities_page.add_child(activities)
+	for activity in ScheduleManager.activities("free"):
+		var button := _button(str(activity.name))
+		button.custom_minimum_size.y = 84
+		button.icon = ThemeKit.icon("leaf" if activity.id == "clearheart" else ("flask-conical" if activity.has("costs") else "users"))
+		button.add_theme_font_size_override("font_size", 18)
+		button.pressed.connect(_free_action.bind(str(activity.id)))
+		activities.add_child(button)
+		free_buttons[activity.id] = button
+	overlay.hide()
 
 
-func _build_schedule_bar() -> Control:
-	# 日程栏展示尚未执行的队列，并提供撤销、执行和结束本月三个命令。
-	var panel := PanelContainer.new()
-	panel.custom_minimum_size.y = 118
-	panel.add_theme_stylebox_override("panel", _panel_style(COLOR_PANEL, 6, Color("66827090"), 1))
-	var margin := MarginContainer.new()
-	margin.add_theme_constant_override("margin_left", 16)
-	margin.add_theme_constant_override("margin_right", 16)
-	margin.add_theme_constant_override("margin_top", 10)
-	margin.add_theme_constant_override("margin_bottom", 10)
-	panel.add_child(margin)
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 12)
-	margin.add_child(row)
-
-	var schedule_column := VBoxContainer.new()
-	schedule_column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	schedule_column.add_theme_constant_override("separation", 6)
-	row.add_child(schedule_column)
-	queue_label = _make_label("本月日程", 16, COLOR_MUTED)
-	schedule_column.add_child(queue_label)
-	queue_flow = HFlowContainer.new()
-	queue_flow.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	queue_flow.add_theme_constant_override("h_separation", 7)
-	queue_flow.add_theme_constant_override("v_separation", 7)
-	schedule_column.add_child(queue_flow)
-
-	var controls := VBoxContainer.new()
-	controls.custom_minimum_size.x = 188
-	controls.add_theme_constant_override("separation", 7)
-	row.add_child(controls)
-	var edit_row := HBoxContainer.new()
-	edit_row.add_theme_constant_override("separation", 7)
-	controls.add_child(edit_row)
-	undo_button = _make_command_button("撤销", false)
-	undo_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	undo_button.pressed.connect(_undo_schedule)
-	edit_row.add_child(undo_button)
-	execute_button = _make_command_button("执行", true)
-	execute_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	execute_button.pressed.connect(_execute_schedule)
-	edit_row.add_child(execute_button)
-	next_month_button = _make_command_button("结束本月", false)
-	next_month_button.pressed.connect(_advance_month)
-	controls.add_child(next_month_button)
-	return panel
-
-
-func _build_ending_overlay() -> void:
-	# 结局层最后加入场景树，所以显示时自然覆盖整个主界面并拦截鼠标。
-	ending_overlay = ColorRect.new()
-	ending_overlay.color = Color("07100de8")
-	ending_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	ending_overlay.visible = false
-	ending_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
-	add_child(ending_overlay)
-	var center := CenterContainer.new()
-	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	ending_overlay.add_child(center)
-	var panel := PanelContainer.new()
-	panel.custom_minimum_size = Vector2(560, 300)
-	panel.add_theme_stylebox_override("panel", _panel_style(Color("1b2923fa"), 6, COLOR_GOLD, 2))
-	center.add_child(panel)
-	var margin := MarginContainer.new()
-	margin.add_theme_constant_override("margin_left", 42)
-	margin.add_theme_constant_override("margin_right", 42)
-	margin.add_theme_constant_override("margin_top", 34)
-	margin.add_theme_constant_override("margin_bottom", 34)
-	panel.add_child(margin)
-	var column := VBoxContainer.new()
-	column.alignment = BoxContainer.ALIGNMENT_CENTER
-	column.add_theme_constant_override("separation", 18)
-	margin.add_child(column)
-	column.add_child(_make_label("八年之后", 15, COLOR_GOLD))
-	ending_title_label = _make_label("", 34, COLOR_PAPER)
-	ending_title_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	column.add_child(ending_title_label)
-	ending_description_label = _make_label("", 17, COLOR_MUTED)
-	ending_description_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	ending_description_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	column.add_child(ending_description_label)
-	var restart := _make_command_button("重新开始", true)
-	restart.custom_minimum_size.x = 180
-	restart.pressed.connect(_restart)
-	column.add_child(restart)
+func _build_work(column: VBoxContainer) -> void:
+	planning = VBoxContainer.new()
+	planning.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	column.add_child(planning)
+	schedule_scroll = _scroll_page(planning)
+	var slots := VBoxContainer.new()
+	slots.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	slots.add_theme_constant_override("separation", 10)
+	schedule_scroll.add_child(slots)
+	for i in range(GameState.schedule_slots):
+		var tile := PanelContainer.new()
+		tile.add_theme_stylebox_override("panel", ThemeKit.panel(Color("#ffffff99"), ThemeKit.LINE, 10, 3))
+		var row := HBoxContainer.new()
+		tile.add_child(row)
+		row.add_theme_constant_override("separation", 14)
+		var number := _label("%02d" % (i + 1), 24, ACCENT)
+		number.custom_minimum_size.x = 38
+		row.add_child(number)
+		var activity_column := VBoxContainer.new()
+		activity_column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		activity_column.add_theme_constant_override("separation", 6)
+		row.add_child(activity_column)
+		var picker := OptionButton.new()
+		picker.custom_minimum_size = Vector2(160, 36)
+		picker.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		picker.fit_to_longest_item = false
+		picker.add_item("待安排")
+		picker.set_item_metadata(0, "")
+		for activity in ScheduleManager.activities("schedule"):
+			picker.add_item(str(activity.name))
+			picker.set_item_metadata(picker.item_count - 1, str(activity.id))
+		picker.item_selected.connect(_choose.bind(picker, i))
+		activity_column.add_child(picker)
+		var detail := _label("", 14, MUTED)
+		detail.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		activity_column.add_child(detail)
+		slot_details.append(detail)
+		selectors.append(picker)
+		for delta in [-1, 1]:
+			var move := _button("")
+			move.icon = ThemeKit.icon("arrow-up" if delta == -1 else "arrow-down")
+			move.custom_minimum_size = Vector2(40, 40)
+			move.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+			move.tooltip_text = "上移日程" if delta == -1 else "下移日程"
+			move.pressed.connect(ScheduleManager.swap_slots.bind(i, i + delta))
+			move.set_meta("edge", i + delta < 0 or i + delta >= GameState.schedule_slots)
+			row.add_child(move)
+			slot_tools.append(move)
+		var clear := _button("")
+		clear.icon = ThemeKit.icon("x")
+		clear.custom_minimum_size = Vector2(40, 40)
+		clear.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		clear.tooltip_text = "清空此槽"
+		clear.pressed.connect(_clear.bind(i))
+		row.add_child(clear)
+		slot_tools.append(clear)
+		slots.add_child(tile)
+	journal = VBoxContainer.new()
+	journal.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	column.add_child(journal)
+	results = RichTextLabel.new()
+	results.bbcode_enabled = true
+	results.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	results.add_theme_color_override("default_color", TEXT)
+	results.add_theme_constant_override("line_separation", 8)
+	journal.add_child(results)
+	status_label = _label("", 15, MUTED)
+	status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	column.add_child(status_label)
+	var commands := HBoxContainer.new()
+	commands.alignment = BoxContainer.ALIGNMENT_END
+	confirm_button = _button("确认日程", true)
+	confirm_button.icon = ThemeKit.icon("arrow-right")
+	confirm_button.custom_minimum_size.x = 190
+	confirm_button.pressed.connect(_confirm)
+	commands.add_child(confirm_button)
+	next_button = _button("下一回合", true)
+	next_button.icon = ThemeKit.icon("arrow-right")
+	next_button.custom_minimum_size.x = 190
+	next_button.pressed.connect(_next)
+	commands.add_child(next_button)
+	column.add_child(commands)
 
 
-func _queue_activity(action_id: String) -> void:
-	# 加入队列前只做“当前状态下”的轻量校验，不立即扣精力或资源。
-	# projected_cost 防止队列中的总成本超过当前共享精力。
-	var activity := ScheduleManager.get_activity(action_id)
-	var reason := ScheduleManager.lock_reason(action_id)
-	if not reason.is_empty():
-		_show_feedback(reason, "error")
+func _build_attributes(column: VBoxContainer) -> void:
+	for group_id in GameState.config.groups:
+		var group: Dictionary = GameState.config.groups[group_id]
+		var heading := _label("", 22, ThemeKit.GROUP_COLORS.get(group_id, ACCENT))
+		group_labels[group_id] = heading
+		column.add_child(heading)
+		var grid := GridContainer.new()
+		grid.columns = 2
+		grid.add_theme_constant_override("h_separation", 28)
+		grid.add_theme_constant_override("v_separation", 10)
+		for key in group.stats:
+			var value := _label("", 17)
+			value.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			value.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			grid.add_child(value)
+			stat_labels[key] = value
+		column.add_child(grid)
+
+
+func _layout() -> void:
+	if portrait == null or modal == null:
 		return
-	var projected_cost := _scheduled_cost() + int(activity["cost"])
-	if projected_cost > GameState.energy:
-		_show_feedback("当前日程会超过共享精力，请先执行或调整安排。", "error")
-		return
-	if action_id == "rest" and scheduled_actions.has("rest"):
-		_show_feedback("本月只能安排一次围炉小憩。", "error")
-		return
-	scheduled_actions.append(action_id)
-	_refresh_schedule()
+	var height := size.y * 0.88
+	portrait.size = Vector2(height / 2.0, height)
+	portrait_origin = Vector2(size.x * 0.63 - portrait.size.x / 2.0, size.y - height - 55)
+	portrait.position = portrait_origin
+	var width := minf(820 if active_menu == "work" else 520, size.x - 64)
+	modal.position = Vector2((size.x - width) / 2.0, 70)
+	modal.size = Vector2(width, size.y - 140)
 
 
-func _undo_schedule() -> void:
-	# 日程是有顺序的，因此撤销最近加入的一项即可。
-	if scheduled_actions.is_empty():
-		return
-	scheduled_actions.pop_back()
-	_refresh_schedule()
+func _process(delta: float) -> void:
+	elapsed += delta
+	if is_instance_valid(portrait) and home.visible:
+		portrait.position.y = portrait_origin.y + sin(elapsed * 1.4) * 1.8
 
 
-func _execute_schedule() -> void:
-	# 复制队列后立即清空原队列，避免执行期间的状态刷新重复结算。
-	# 每项行动依次进入 ScheduleManager；任一项失败就停止剩余日程。
-	if scheduled_actions.is_empty():
-		_show_feedback("先为这个月安排一项行动。", "error")
-		return
-	var actions_to_run := scheduled_actions.duplicate()
-	scheduled_actions.clear()
-	for action_id in actions_to_run:
-		var result := ScheduleManager.execute_activity(action_id)
-		if not result["ok"]:
-			_show_feedback(result["message"], result["tone"])
-			break
-		if GameState.game_finished:
-			break
-	_refresh_schedule()
+func open_menu(menu: String) -> void:
+	active_menu = menu
+	work_page.visible = menu == "work"
+	attributes_page.visible = menu == "attributes"
+	activities_page.visible = menu == "activities"
+	modal_title.text = {"attributes": "宁宁 · 人物", "activities": "自由活动", "work": "培养日程" if GameState.phase == GameState.Phase.FREE else "成长札记"}[menu]
+	overlay.show()
+	_layout()
 
 
-func _advance_month() -> void:
-	# 防止玩家误把已安排但尚未执行的日程直接跳过。
-	if not scheduled_actions.is_empty():
-		_show_feedback("还有未执行的日程，请先执行或逐项撤销。", "error")
-		return
-	GameState.advance_month()
+func close_menu() -> void:
+	overlay.hide()
+	active_menu = ""
+
+
+func show_cave() -> void:
+	close_menu()
+	in_cave = true
+	home.hide()
+	cave_view.show()
+	location_label.text = "洞天"
+	home_button.show()
+
+
+func show_home() -> void:
+	close_menu()
+	in_cave = false
+	home.show()
+	cave_view.hide()
+	location_label.text = "山居"
+	home_button.hide()
+
+
+func _unhandled_key_input(event: InputEvent) -> void:
+	if event.is_action_pressed("ui_cancel"):
+		if overlay.visible:
+			close_menu()
+		elif in_cave:
+			show_home()
+		get_viewport().set_input_as_handled()
 
 
 func _refresh() -> void:
-	# 这是 GameState -> UI 的单向渲染入口。
-	# 任何系统修改状态并发出 state_changed 后，所有可见信息在这里同步。
-	time_label.text = "第 %d 年 · %d 月｜%d 岁" % [GameState.cycle_year, GameState.month, GameState.daughter_age]
-	energy_label.text = "共享精力 %d/%d" % [GameState.energy, GameState.max_energy]
-	resource_label.text = "灵石 %d｜药材 %d" % [GameState.spirit_stones, GameState.herbs]
-	daughter_realm_label.text = "女儿境界  %s  ·  修为 %d/100" % [GameState.daughter_realm_name(), GameState.daughter_progress]
-	daughter_progress.value = GameState.daughter_progress
+	var editable: bool = GameState.phase == GameState.Phase.FREE
+	planning.visible = editable
+	journal.visible = not editable
+	home_button.visible = in_cave
+	energy_label.text = "精力  %d / %d" % [GameState.energy, int(GameState.config.rules.max_energy)]
+	pressure_label.text = "压力  %d / 100" % GameState.pressure
+	pressure_bar.value = GameState.pressure
+	var probabilities: Array = ScheduleManager.pressure_band(GameState.pressure).probabilities
+	pressure_label.tooltip_text = "大成功 %.0f%% · 成功 %.0f%% · 失败 %.0f%%" % [float(probabilities[0]) * 100, float(probabilities[1]) * 100, float(probabilities[2]) * 100]
+	var stage: int = GameState.growth_phase()
+	if stage != portrait_stage:
+		portrait_stage = stage
+		var atlas := AtlasTexture.new()
+		atlas.atlas = load("res://assets/daughter_stages.png")
+		var strip_width := atlas.atlas.get_width() / 3.0
+		atlas.region = Rect2(stage * strip_width, 0, strip_width, atlas.atlas.get_height())
+		atlas.filter_clip = true
+		portrait.texture = atlas
+	for i in range(selectors.size()):
+		var picker: OptionButton = selectors[i]
+		picker.disabled = not editable
+		picker.select(0)
+		for j in range(1, picker.item_count):
+			var id := str(picker.get_item_metadata(j))
+			var activity := ScheduleManager.activity_by_id(id)
+			picker.set_item_disabled(j, not ScheduleManager.availability(activity).is_empty())
+			if GameState.plan[i] == id:
+				picker.select(j)
+				picker.tooltip_text = _growth_text(activity.growth) + " · 压力 +%d" % int(activity.pressure)
+				for key in activity.get("costs", {}):
+					picker.tooltip_text += " · %s -%d" % [GameState.config.items[key].name, int(activity.costs[key])]
+				slot_details[i].text = picker.tooltip_text
+		if GameState.plan[i].is_empty():
+			picker.tooltip_text = ""
+			slot_details[i].text = ""
+	for button in slot_tools:
+		button.disabled = not editable or bool(button.get_meta("edge", false))
+	var selected := GameState.plan.size() - GameState.plan.count("")
+	var projected: int = GameState.pressure
+	for id in GameState.plan:
+		if not id.is_empty():
+			projected = clampi(projected + int(ScheduleManager.activity_by_id(id).pressure), 0, 100)
+	status_label.text = "已安排 %d / %d   ·   预计压力 %d → %d" % [selected, GameState.schedule_slots, GameState.pressure, projected] if editable else "本回合已结算"
+	schedule_button.text = "安排日程  %d / %d" % [selected, GameState.schedule_slots] if editable else "成长札记"
+	for activity in ScheduleManager.activities("free"):
+		var button: Button = free_buttons[activity.id]
+		var reason := ScheduleManager.free_action_error(str(activity.id))
+		button.disabled = not reason.is_empty()
+		button.text = "%s\n精力 %d" % [activity.name, int(activity.get("energy_cost", 0))]
+		var detail := _growth_text(activity.growth)
+		if activity.has("costs"):
+			for key in activity.costs:
+				button.text = "%s\n持有 %d · 压力 %d" % [activity.name, int(GameState.inventory.get(key, 0)), int(activity.pressure)]
+				detail = "压力 %d · %s -%d" % [int(activity.pressure), GameState.config.items[key].name, int(activity.costs[key])]
+		button.tooltip_text = reason if not reason.is_empty() else detail
+	var names := GameState.stat_names()
 	for key in stat_labels:
-		var item: Dictionary = stat_labels[key]
-		item["label"].text = "%s  %02d" % [item["name"], GameState.daughter_stats[key]]
-	father_realm_label.text = "父亲修为  %s  ·  重修 %d/100" % [GameState.father_realm_name(), GameState.father_progress]
-	father_progress.value = GameState.father_progress
-	bond_label.text = "父女羁绊  %d/100" % GameState.bond
-	heart_label.text = "心魔压力  %d/100" % GameState.heart_demon
-	heart_label.modulate = COLOR_RED if GameState.heart_demon >= 70 else COLOR_PAPER
-	stance_label.text = "旧案心境：%s｜身世线索：%s" % [GameState.vengeance_descriptor(), GameState.truth_descriptor()]
-	sect_label.text = GameState.sect_status
-
-	# 解锁条件可能随一次行动立刻改变，例如父亲筑基后洞天种田立即可用。
-	for activity in ScheduleManager.get_activities():
-		var button: Button = activity_buttons[activity["id"]]
-		var reason := ScheduleManager.lock_reason(activity["id"])
-		button.disabled = not reason.is_empty() or GameState.game_finished
-		button.tooltip_text = reason if not reason.is_empty() else activity["summary"]
-		var suffix := "\n%s" % activity["summary"]
-		if not reason.is_empty():
-			suffix = "\n锁定：%s" % reason
-		button.text = "%s · %s    %d 精力%s" % [activity["actor"], activity["title"], activity["cost"], suffix]
-	next_month_button.disabled = GameState.game_finished
-	_refresh_schedule()
-
-
-func _refresh_schedule() -> void:
-	# 队列较短，直接重建标签比维护节点差异更简单，也更不容易显示旧数据。
-	for child in queue_flow.get_children():
-		child.queue_free()
-	if scheduled_actions.is_empty():
-		queue_flow.add_child(_make_label("尚未安排。选择上方行动加入日程。", 14, Color("829089")))
-	else:
-		for action_id in scheduled_actions:
-			var activity := ScheduleManager.get_activity(action_id)
-			var chip := Label.new()
-			chip.text = "%s  -%d" % [activity["title"], activity["cost"]]
-			chip.add_theme_font_size_override("font_size", 14)
-			chip.add_theme_color_override("font_color", COLOR_PAPER)
-			chip.add_theme_stylebox_override("normal", _panel_style(Color(activity["accent"] + "55"), 4, Color(activity["accent"]), 1))
-			queue_flow.add_child(chip)
-	queue_label.text = "本月日程  已用 %d/%d 精力" % [_scheduled_cost(), GameState.energy]
-	execute_button.disabled = scheduled_actions.is_empty() or GameState.game_finished
-	undo_button.disabled = scheduled_actions.is_empty() or GameState.game_finished
+		var bonus: int = GameState.equipment_bonus(key)
+		stat_labels[key].text = "%s  %d%s" % [names[key], GameState.attribute(key), (" +%d" % bonus) if bonus != 0 else ""]
+	for group_id in group_labels:
+		group_labels[group_id].text = "%s  %d" % [GameState.config.groups[group_id].name, GameState.group_total(group_id)]
+		summary_labels[group_id].text = str(GameState.group_total(group_id))
+		summary_labels[group_id].tooltip_text = summary_labels[group_id].text
+	confirm_button.visible = editable
+	confirm_button.disabled = not ScheduleManager.plan_error().is_empty()
+	confirm_button.tooltip_text = ScheduleManager.plan_error()
+	next_button.visible = GameState.phase in [GameState.Phase.RESULTS, GameState.Phase.FINISHED]
+	next_button.text = "重新开始" if GameState.phase == GameState.Phase.FINISHED else ("结束养成" if GameState.turn == GameState.total_turns() else "下一回合")
+	var lines: Array[String] = []
+	for entry in GameState.last_results:
+		lines.append("[color=#287764]%s · %s[/color]\n%s   压力 %d → %d" % [entry.name, entry.outcome, _growth_text(entry.gains), entry.pressure_before, entry.pressure_after])
+	results.text = "\n\n".join(lines)
+	if not GameState.last_production.is_empty() and not GameState.last_production.rows.is_empty():
+		results.append_text("\n\n[color=#507f9a]洞天收获[/color]")
+		for row in GameState.last_production.rows:
+			var production: Array[String] = []
+			for key in row.outputs:
+				production.append("%s +%d" % [GameState.config.items[key].name, int(row.outputs[key])])
+			results.append_text("\n%s · %s" % [row.name, str(row.reason) if not str(row.reason).is_empty() else " · ".join(production)])
+	if GameState.phase == GameState.Phase.FINISHED:
+		status_label.text = "养成结束"
+	if active_menu == "work":
+		modal_title.text = "培养日程" if editable else "成长札记"
 
 
-func _scheduled_cost() -> int:
-	# 队列只保存 id，所以成本始终从行动定义读取，避免保存两份数据。
-	var total := 0
-	for action_id in scheduled_actions:
-		total += int(ScheduleManager.get_activity(action_id)["cost"])
-	return total
+func _choose(option: int, picker: OptionButton, slot: int) -> void:
+	_set_notice(ScheduleManager.assign_slot(slot, str(picker.get_item_metadata(option))))
+	_refresh()
 
 
-func _show_feedback(message: String, tone: String) -> void:
-	# tone 只决定反馈颜色，不影响游戏逻辑。
-	# RichTextLabel 允许同一块区域同时表现小标题和正文层级。
-	if feedback_label == null:
+func _clear(slot: int) -> void:
+	_set_notice(ScheduleManager.assign_slot(slot, ""))
+
+
+func _free_action(id: String) -> void:
+	var result := ScheduleManager.execute_free_action(id)
+	var message := str(result.message)
+	if result.ok:
+		message += "  " + _growth_text(result.gains)
+		if int(result.pressure_change) != 0:
+			message += "  压力 %d" % int(result.pressure_change)
+		close_menu()
+	_set_notice(message)
+
+
+func _confirm() -> void:
+	var result := ScheduleManager.confirm_schedule()
+	if result.get("needs_confirmation", false):
+		idle_dialog.dialog_text = str(result.message)
+		idle_dialog.popup_centered(Vector2i(430, 250))
 		return
-	var color := "#f4f0e5"
-	match tone:
-		"growth": color = "#b9dbbf"
-		"breakthrough": color = "#e7bd68"
-		"danger": color = "#e58a80"
-		"error": color = "#d99188"
-		"rest": color = "#b8ced5"
-		"story": color = "#e0c7a1"
-	feedback_label.text = "[color=#91a199][font_size=13]本月札记[/font_size][/color]\n[color=%s]%s[/color]" % [color, message]
+	_set_notice("" if result.ok else str(result.message))
+	if result.ok:
+		open_menu("work")
 
 
-func _show_ending(title: String, description: String) -> void:
-	# GameState 决定得到什么结局，Main 只负责展示结果。
-	ending_title_label.text = title
-	ending_description_label.text = description
-	ending_overlay.visible = true
+func _confirm_ignoring_idle() -> void:
+	var result := ScheduleManager.confirm_schedule(true)
+	_set_notice("" if result.ok else str(result.message))
+	if result.ok:
+		open_menu("work")
 
 
-func _restart() -> void:
-	scheduled_actions.clear()
-	ending_overlay.visible = false
-	GameState.reset_game()
+func _next() -> void:
+	if GameState.phase == GameState.Phase.FINISHED:
+		GameState.reset_game()
+	else:
+		GameState.advance_turn()
+	_set_notice("")
+	show_home()
 
 
-func _make_progress(fill_color: Color) -> ProgressBar:
-	# 以下是小型 UI 工厂函数，用于统一控件尺寸和样式。
-	var bar := ProgressBar.new()
-	bar.custom_minimum_size.y = 10
-	bar.max_value = 100
-	bar.show_percentage = false
-	bar.add_theme_stylebox_override("background", _panel_style(Color("0e1714"), 3))
-	bar.add_theme_stylebox_override("fill", _panel_style(fill_color, 3))
-	return bar
+func _set_notice(message: String) -> void:
+	notice.text = message
+	notice.visible = not message.strip_edges().is_empty()
+	if overlay.visible and not message.is_empty() and active_menu == "work":
+		status_label.text = message
 
 
-func _make_label(text_value: String, size: int, color: Color) -> Label:
-	var result := Label.new()
-	result.text = text_value
-	result.add_theme_font_size_override("font_size", size)
-	result.add_theme_color_override("font_color", color)
-	return result
+func _growth_text(growth: Dictionary) -> String:
+	var names := GameState.stat_names()
+	var parts: Array[String] = []
+	for key in growth:
+		parts.append("%s +%d" % [names[key], int(growth[key])])
+	return " · ".join(parts)
 
 
-func _make_command_button(text_value: String, primary: bool) -> Button:
+func _scroll_page(parent: Control) -> ScrollContainer:
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	parent.add_child(scroll)
+	return scroll
+
+
+func _label(value: String, font_size: int, color: Color = TEXT) -> Label:
+	var label := Label.new()
+	label.text = value
+	label.add_theme_font_size_override("font_size", font_size)
+	label.add_theme_color_override("font_color", color)
+	return label
+
+
+func _button(value: String, primary: bool = false) -> Button:
 	var button := Button.new()
-	button.text = text_value
-	button.custom_minimum_size.y = 38
-	button.add_theme_font_size_override("font_size", 15)
-	var normal_color := Color("416e50") if primary else Color("293b33")
-	var hover_color := Color("50845f") if primary else Color("354c41")
-	button.add_theme_stylebox_override("normal", _panel_style(normal_color, 4, Color("7fa58b80"), 1))
-	button.add_theme_stylebox_override("hover", _panel_style(hover_color, 4, COLOR_GOLD, 1))
-	button.add_theme_stylebox_override("pressed", _panel_style(Color("203129"), 4, COLOR_GOLD, 2))
-	button.add_theme_stylebox_override("disabled", _panel_style(Color("222a26"), 4))
+	button.text = value
+	button.custom_minimum_size.y = 46
+	if primary:
+		ThemeKit.primary(button)
 	return button
-
-
-func _panel_style(color: Color, radius: int = 4, border_color: Color = Color.TRANSPARENT, border_width: int = 0) -> StyleBoxFlat:
-	# Godot 的 StyleBoxFlat 类似一块可复用的 CSS 面板样式。
-	var style := StyleBoxFlat.new()
-	style.bg_color = color
-	style.corner_radius_top_left = radius
-	style.corner_radius_top_right = radius
-	style.corner_radius_bottom_left = radius
-	style.corner_radius_bottom_right = radius
-	style.border_color = border_color
-	style.border_width_left = border_width
-	style.border_width_right = border_width
-	style.border_width_top = border_width
-	style.border_width_bottom = border_width
-	style.content_margin_left = 10
-	style.content_margin_right = 10
-	style.content_margin_top = 7
-	style.content_margin_bottom = 7
-	return style
-
-
-func _build_theme() -> Theme:
-	# 优先使用系统中文字体；候选列表让工程在不同操作系统上仍有回退。
-	var result := Theme.new()
-	var system_font := SystemFont.new()
-	system_font.font_names = PackedStringArray(["PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei"])
-	system_font.font_weight = 500
-	result.default_font = system_font
-	result.default_font_size = 16
-	result.set_color("font_color", "Label", COLOR_PAPER)
-	result.set_color("font_color", "Button", COLOR_PAPER)
-	return result
