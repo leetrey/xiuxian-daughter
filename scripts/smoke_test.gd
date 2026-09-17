@@ -1,10 +1,12 @@
 extends Node
 
 # 一份场景覆盖培养与洞天主干。--ui-snapshot=/tmp/目录 可导出真实渲染截图。
+# 这些是程序回归例子，含默认数值断言；作者仅检查填表应运行 validate_content.tscn。
 var failures := 0
 var ui_completed := false
 
 
+## 默认只跑规则；带截图参数时才创建界面。退出码便于终端判断，不只依赖最后一行文字。
 func _ready() -> void:
 	if not GameState.config_error.is_empty():
 		get_tree().quit(1)
@@ -34,6 +36,7 @@ func _fill(id: String = "sword") -> void:
 		_check(ScheduleManager.assign_slot(i, id).is_empty(), "安排日程")
 
 
+## 临时修改内存配置验证错误和扩展场景，不写入 JSON；用完恢复，避免污染后续测试。
 func _run_content_rules() -> void:
 	var items: Dictionary = GameState.config.items.duplicate(true)
 	var cave: Dictionary = GameState.cave_config.duplicate(true)
@@ -117,6 +120,7 @@ func _run_content_rules() -> void:
 	GameState.reset_game()
 
 
+## 固定种子保证可复现；每组案例重开本局，分别验证阶段、成本、随机与 A/B 边界。
 func _run_rules() -> void:
 	GameState.reset_game(42)
 	_check(GameState.base_stats.size() == 16, "16 项细分")
@@ -245,6 +249,7 @@ func _row(report: Dictionary, id: int) -> Dictionary:
 	return {}
 
 
+## 用小布局验证核心生产闭环；重点检查拒绝操作无副作用、预览等于实算及防重复入库。
 func _run_cave_rules() -> void:
 	var config: Dictionary = GameState.cave_config.duplicate(true)
 	for key in ["buildings", "recipes", "entrance", "initial_roads", "workers"]:
@@ -387,6 +392,7 @@ func _run_cave_rules() -> void:
 	GameState.reset_game()
 
 
+## 实例化真实主场景，通过控件信号和地块输入走查；这不是全量真人鼠标/键盘自动化。
 func _capture_ui(directory: String) -> void:
 	DirAccess.make_dir_recursive_absolute(directory)
 	var ui: Control = load("res://scenes/main.tscn").instantiate()
@@ -542,6 +548,7 @@ func _capture_ui(directory: String) -> void:
 	ui_completed = true
 
 
+## 等容器完成布局且本帧渲染结束再读像素；此流程需要有图形输出，不能加 --headless。
 func _snapshot(path: String) -> void:
 	await get_tree().process_frame
 	await get_tree().process_frame

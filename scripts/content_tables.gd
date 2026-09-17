@@ -1,6 +1,7 @@
 extends RefCounted
 
 # 作者修改的是 JSON 表；这里仅负责读取、类型与跨表引用检查，不执行玩法。
+# 读取函数返回 {data, error}；校验函数返回错误文字，空字符串表示通过。
 const ITEM_CATEGORIES := ["resource", "herb", "product"]
 
 
@@ -11,6 +12,7 @@ static func read_object(path: String) -> Dictionary:
 	return parse_object(file.get_as_text(), path)
 
 
+## 与磁盘读取分开，使测试可以直接传入错误 JSON；path 只用于定位报错来源。
 static func parse_object(source: String, path: String) -> Dictionary:
 	var parser := JSON.new()
 	if parser.parse(source) != OK:
@@ -39,6 +41,7 @@ static func validate_items(items: Variant) -> String:
 	return ""
 
 
+## 库存/成本允许零；配方投入产出传 allow_zero=false，无投入用空对象表达。
 static func validate_amounts(amounts: Variant, items: Dictionary, path: String, allow_zero: bool = true) -> String:
 	if not amounts is Dictionary:
 		return path + ": 需要物品 ID 到整数数量的对象"
@@ -76,6 +79,7 @@ static func validate_recipes(recipes: Variant, items: Dictionary) -> String:
 	return ""
 
 
+## 建筑只持有配方 ID；这里把建筑、配方、物品三张表连起来检查产物分类。
 static func validate_building_recipes(building: Dictionary, recipes: Dictionary, items: Dictionary, path: String) -> String:
 	var allowed = building.get("output_categories", [])
 	if not allowed is Array:

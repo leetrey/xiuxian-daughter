@@ -97,6 +97,7 @@
 
 ## 修改与阅读
 
+- [07 开发与调试手册](07-development-handbook.md)：启动、VS Code 配合、按调用链读注释、修改内容/规则/UI、断点和测试。核心脚本已补充职责、关键流程与副作用边界注释，不改变玩法行为。
 - [06 内容填写指南](06-content-authoring.md)：作者填写物品、种植、双原料加工、物品使用与验证的示例。
 - [items.json](../data/items.json) 与 [recipes.json](../data/recipes.json)：独立物品和配方内容表。
 - [cultivation.json](../data/cultivation.json)：调活动和数值，修改后重启加载。

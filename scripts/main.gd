@@ -1,10 +1,12 @@
 extends Control
 
 # 场景与菜单只提交选择并展示结果，不在刷新时掷骰、扣费或增加属性。
+# main.tscn 只提供根节点；运行时由 _build_* 创建控件，_refresh 同步数值。
 const ThemeKit = preload("res://scripts/ui_theme.gd")
 const TEXT := ThemeKit.INK
 const MUTED := ThemeKit.MUTED
 const ACCENT := ThemeKit.JADE
+# 缓存控件引用，刷新时按槽位或属性 ID 更新，不反复创建整套界面。
 var selectors: Array[OptionButton] = []
 var slot_details: Array[Label] = []
 var slot_tools: Array[Button] = []
@@ -37,12 +39,14 @@ var modal_title: Label
 var work_page: VBoxContainer
 var attributes_page: ScrollContainer
 var activities_page: ScrollContainer
+# 这些是界面临时状态，与 GameState.phase 无关；开关菜单不会推进回合。
 var active_menu := ""
 var in_cave := false
 var elapsed := 0.0
 var portrait_origin := Vector2.ZERO
 
 
+## 按背景、场景内容、HUD、浮层的顺序添加节点，让前景控件覆盖场景并接收点击。
 func _ready() -> void:
 	if not GameState.config_error.is_empty():
 		return
@@ -83,6 +87,7 @@ func _ready() -> void:
 	idle_dialog.canceled.connect(show_cave)
 	add_child(idle_dialog)
 	resized.connect(_layout)
+	# 控件全部创建后再订阅；每次合法操作提交完成时，状态层通知界面重读数据。
 	GameState.state_changed.connect(_refresh)
 	_refresh()
 	_layout()
@@ -119,6 +124,7 @@ func _build_home_summary() -> void:
 	column.add_child(details_button)
 
 
+## HUD 是贴在场景边缘的状态与操作区；锚点固定边缘，offset 留出内边距。
 func _build_hud() -> void:
 	var header := HBoxContainer.new()
 	header.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
@@ -204,6 +210,7 @@ func _build_hud() -> void:
 	add_child(notice)
 
 
+## 三种菜单共用遮罩和外框；遮罩接住背景点击，避免点穿到下方场景。
 func _build_overlay() -> void:
 	overlay = Control.new()
 	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -260,6 +267,7 @@ func _build_overlay() -> void:
 	overlay.hide()
 
 
+## 日程行只创建一次；滚动容器承载 3 至 5 槽，确认按钮放在滚动区外。
 func _build_work(column: VBoxContainer) -> void:
 	planning = VBoxContainer.new()
 	planning.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -288,9 +296,11 @@ func _build_work(column: VBoxContainer) -> void:
 		picker.fit_to_longest_item = false
 		picker.add_item("待安排")
 		picker.set_item_metadata(0, "")
+		# 名称负责显示，metadata 保存稳定 ID；菜单顺序或中文名改变不会串活动。
 		for activity in ScheduleManager.activities("schedule"):
 			picker.add_item(str(activity.name))
 			picker.set_item_metadata(picker.item_count - 1, str(activity.id))
+		# 信号先传选项序号，bind 再追加控件与槽位，最终调用 _choose(option, picker, i)。
 		picker.item_selected.connect(_choose.bind(picker, i))
 		activity_column.add_child(picker)
 		var detail := _label("", 14, MUTED)
@@ -363,6 +373,7 @@ func _build_attributes(column: VBoxContainer) -> void:
 		column.add_child(grid)
 
 
+## 按当前 Control 画布尺寸布局，不直接使用操作系统窗口像素；缩放由项目设置处理。
 func _layout() -> void:
 	if portrait == null or modal == null:
 		return
@@ -375,12 +386,14 @@ func _layout() -> void:
 	modal.size = Vector2(width, size.y - 140)
 
 
+## 每帧仅做立绘轻微起伏；任何扣费、压力变化或回合推进都不能放在这里。
 func _process(delta: float) -> void:
 	elapsed += delta
 	if is_instance_valid(portrait) and home.visible:
 		portrait.position.y = portrait_origin.y + sin(elapsed * 1.4) * 1.8
 
 
+## work 按游戏阶段展示日程或札记；重新打开不会重新执行已经完成的培养。
 func open_menu(menu: String) -> void:
 	active_menu = menu
 	work_page.visible = menu == "work"
@@ -396,6 +409,7 @@ func close_menu() -> void:
 	active_menu = ""
 
 
+## 家园与洞天节点都保留在树中，只切换可见性；日程草稿与建筑状态不会被重建。
 func show_cave() -> void:
 	close_menu()
 	in_cave = true
@@ -423,6 +437,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 
 
+## 只把 GameState 投影为文字、选项和可用状态；结果使用结算记录而非再次掷骰。
 func _refresh() -> void:
 	var editable: bool = GameState.phase == GameState.Phase.FREE
 	planning.visible = editable
@@ -435,6 +450,7 @@ func _refresh() -> void:
 	pressure_label.tooltip_text = "大成功 %.0f%% · 成功 %.0f%% · 失败 %.0f%%" % [float(probabilities[0]) * 100, float(probabilities[1]) * 100, float(probabilities[2]) * 100]
 	var stage: int = GameState.growth_phase()
 	if stage != portrait_stage:
+		# AtlasTexture 取同一张透明图集的一个等宽区域，不在磁盘生成三份裁切图。
 		portrait_stage = stage
 		var atlas := AtlasTexture.new()
 		atlas.atlas = load("res://assets/daughter_stages.png")
@@ -445,6 +461,7 @@ func _refresh() -> void:
 	for i in range(selectors.size()):
 		var picker: OptionButton = selectors[i]
 		picker.disabled = not editable
+		# select() 只回显当前草稿，不发 item_selected；真实修改仍走 _choose。
 		picker.select(0)
 		for j in range(1, picker.item_count):
 			var id := str(picker.get_item_metadata(j))
@@ -529,6 +546,7 @@ func _free_action(id: String) -> void:
 	_set_notice(message)
 
 
+## 先让规则层确认；收到 needs_confirmation 才弹闲置提醒，此时尚未结算。
 func _confirm() -> void:
 	var result := ScheduleManager.confirm_schedule()
 	if result.get("needs_confirmation", false):
@@ -547,6 +565,7 @@ func _confirm_ignoring_idle() -> void:
 		open_menu("work")
 
 
+## 结果页前进与终局重开共用按钮；是否可以推进仍由 GameState 决定。
 func _next() -> void:
 	if GameState.phase == GameState.Phase.FINISHED:
 		GameState.reset_game()

@@ -1,5 +1,7 @@
 extends Control
 
+# 洞天的交互层：Board 给出逻辑格，本脚本按模式调用 Cave 规则，再展示结果。
+# 不在这里重算收益或直接改库存；与 main.gd 一样监听 state_changed 刷新。
 const Board = preload("res://scripts/cave_board.gd")
 const ThemeKit = preload("res://scripts/ui_theme.gd")
 const TEXT := ThemeKit.INK
@@ -20,9 +22,11 @@ var worker_pickers: Array[OptionButton] = []
 var mode_buttons: Dictionary = {}
 var current_mode := "select"
 var selected_id := -1
+# 记录详情面板对应的建筑；与 selected_id 不同时才重建配方和工作槽控件。
 var inspector_id := -2
 
 
+## 场景画布和边缘控件分层创建；建筑详情隐藏时把空间交还给地块与工具栏。
 func _ready() -> void:
 	var background := TextureRect.new()
 	background.texture = load("res://assets/cave_valley.png")
@@ -161,6 +165,7 @@ func _set_mode(value: String) -> void:
 	_refresh()
 
 
+## 同一个格子点击按当前模式解释；移动先选实例，再选落点，不生成新建筑 ID。
 func _cell_clicked(cell: Vector2i) -> void:
 	var result: Dictionary = {}
 	match current_mode:
@@ -185,6 +190,7 @@ func _cell_clicked(cell: Vector2i) -> void:
 	notice.text = str(result.get("message", ""))
 
 
+## 同时响应规则变化与本地选中变化；结果阶段仍能查看，但禁用管理操作。
 func _refresh() -> void:
 	if board == null:
 		return
@@ -192,6 +198,7 @@ func _refresh() -> void:
 	if not editable:
 		current_mode = "select"
 	for id in mode_buttons:
+		# 刷新选中外观时不再触发模式切换信号，避免 UI 与回调互相调用。
 		mode_buttons[id].set_pressed_no_signal(id == current_mode)
 		mode_buttons[id].disabled = not editable and id != "select"
 	catalog.disabled = not editable
@@ -211,6 +218,7 @@ func _refresh() -> void:
 	cost_label.text = "%s  %d×%d  ·  %s" % [data.name, int(data.size[0]), int(data.size[1]), _amounts(data.costs)]
 	population_label.text = "入住 %d / %d  ·  御灵 %d" % [
 		GameState.Cave.residents(GameState.cave), GameState.Cave.capacity(GameState.cave), GameState.cave.workers.size()]
+	# 自由阶段显示预测；结算后读保存的报告，不能用已经入库的库存重算本回合。
 	var report: Dictionary = GameState.Cave.preview() if editable else GameState.last_production
 	if report.is_empty():
 		report = {"rows": [], "consumed": {}, "produced": {}}
@@ -222,6 +230,7 @@ func _refresh() -> void:
 	_refresh_inspector(report, editable)
 
 
+## 切换建筑时重建控件；同一建筑刷新时只同步选项，保留稳定的控件结构。
 func _refresh_inspector(report: Dictionary, editable: bool) -> void:
 	var building: Dictionary = GameState.Cave.find_building(selected_id)
 	var changed := inspector_id != selected_id
@@ -229,6 +238,7 @@ func _refresh_inspector(report: Dictionary, editable: bool) -> void:
 		inspector_id = selected_id
 		recipe_picker.clear()
 		for child in workers_box.get_children():
+			# 先立即脱离容器，再延迟释放，避免新旧工作槽在当前帧同时参与布局。
 			workers_box.remove_child(child)
 			child.queue_free()
 		worker_pickers.clear()
@@ -300,6 +310,7 @@ func _recipe_changed(index: int) -> void:
 	notice.text = str(result.message)
 
 
+## index 是菜单序号，slot 是建筑工作槽；从 metadata 取御灵 ID，不能混用三者。
 func _worker_changed(index: int, slot: int, picker: OptionButton) -> void:
 	var result: Dictionary = GameState.Cave.assign_worker(selected_id, slot, str(picker.get_item_metadata(index)))
 	_refresh()

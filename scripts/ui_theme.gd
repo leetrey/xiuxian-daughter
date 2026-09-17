@@ -1,6 +1,7 @@
 extends RefCounted
 
 # 养成与洞天共用的视觉参数；不参与任何玩法数值。
+# 普通 RefCounted 工具脚本，通过静态方法调用；不是第三个 Autoload。
 const BACKGROUND := Color("#f5f7f5")
 const PAPER := Color("#ffffff")
 const INK := Color("#263c38")
@@ -16,6 +17,7 @@ const GROUP_COLORS := {"physique": Color("#ae6955"), "dao": Color("#507f9a"), "a
 static var _icons: Dictionary = {}
 
 
+## 每次创建独立样式，后续改一个面板的边距/边框不会连带修改其他控件。
 static func panel(color: Color, border: Color = Color.TRANSPARENT, padding: int = 12, radius: int = 6) -> StyleBoxFlat:
 	var style := StyleBoxFlat.new()
 	style.bg_color = color
@@ -27,15 +29,17 @@ static func panel(color: Color, border: Color = Color.TRANSPARENT, padding: int 
 
 
 static func icon(name: String) -> Texture2D:
-	# 自绘建筑必须保留纹理引用，不能在提交 draw 命令后就释放临时资源。
+	# 共享工具图标并保留纹理引用；用于自绘时也不会在 draw 命令完成前被释放。
 	if not _icons.has(name):
 		_icons[name] = load("res://assets/icons/%s.svg" % name)
 	return _icons[name] as Texture2D
 
 
+## 根界面设置此 Theme，子控件自动继承；个别主按钮和 HUD 再用 override 覆盖。
 static func make_theme() -> Theme:
 	var value := Theme.new()
 	var font := SystemFont.new()
+	# 使用本机可用字体，工程未内置字体文件；跨平台缺字时检查这些候选字体。
 	font.font_names = PackedStringArray(["Hiragino Sans GB", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC"])
 	value.default_font = font
 	value.default_font_size = 16
@@ -112,6 +116,7 @@ static func hud_panel(padding: int = 16) -> StyleBoxFlat:
 	return style
 
 
+## 场景按钮统一处理正常、悬停、按下和禁用外观；emphasized 用于右下角主操作。
 static func game_button(button: Button, emphasized: bool = false) -> void:
 	for state in ["normal", "hover", "pressed", "disabled"]:
 		var color := Color("#893f43f5") if emphasized else HUD

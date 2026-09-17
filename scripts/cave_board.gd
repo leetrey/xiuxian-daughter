@@ -1,6 +1,7 @@
 extends Control
 
 # 逻辑仍是方格；绘制和鼠标命中共用等距投影，不改变道路或距离规则。
+# 本脚本不提交建造；只发 cell_clicked/cancelled，由 cave_ui.gd 解释当前工具。
 signal cell_clicked(cell: Vector2i)
 signal cancelled
 const ThemeKit = preload("res://scripts/ui_theme.gd")
@@ -9,6 +10,7 @@ var mode := "select"
 var build_type := "herb_field"
 var hover_cell := Vector2i(-1, -1)
 var sprites: Array[AtlasTexture] = []
+# 缓存原图像素用于透明区域命中；不能每次鼠标移动都重新读取纹理。
 var sprite_pixels: Image
 
 
@@ -16,6 +18,7 @@ func _ready() -> void:
 	clip_contents = true
 	var sheet: Texture2D = load("res://assets/cave_buildings.png")
 	sprite_pixels = sheet.get_image()
+	# 图集为 4 列 2 行，单格 384x512；素材布局改变时须同步这些取图区域。
 	for index in range(8):
 		var sprite := AtlasTexture.new()
 		sprite.atlas = sheet
@@ -28,6 +31,7 @@ func _ready() -> void:
 		queue_redraw())
 
 
+## 返回一格菱形的屏幕宽度；取宽高两个限制的较小值，并留出屋顶与边缘空间。
 func cell_size() -> float:
 	var span: float = GameState.cave_config.width + GameState.cave_config.height
 	return maxf(1, minf((size.x - 24) / (span * 0.5), (size.y - 70) / (span * 0.25)))
@@ -39,6 +43,7 @@ func grid_origin() -> Vector2:
 	return Vector2((size.x + (GameState.cave_config.height - GameState.cave_config.width) * step * 0.5) / 2.0, (size.y - span * step * 0.25) / 2.0 + 24)
 
 
+## 逻辑坐标 -> 本控件局部像素；横向用 x-y，纵向用 x+y，得到宽高比 2:1 的菱形。
 func project(point: Vector2) -> Vector2:
 	return grid_origin() + Vector2((point.x - point.y) * 0.5, (point.x + point.y) * 0.25) * cell_size()
 
@@ -47,11 +52,13 @@ func cell_center(cell: Vector2i) -> Vector2:
 	return project(Vector2(cell) + Vector2(0.5, 0.5))
 
 
+## project 的逆变换；floor 得到所属格，不是四舍五入到最近格心。
 func cell_at(point: Vector2) -> Vector2i:
 	var offset := (point - grid_origin()) / cell_size()
 	return Vector2i(floori(offset.x + offset.y * 2), floori(offset.y * 2 - offset.x))
 
 
+## 放置和移动落点使用地面格；选择建筑时优先命中可见像素，让屋顶也能被点选。
 func _gui_input(event: InputEvent) -> void:
 	if event is InputEventMouse:
 		hover_cell = cell_at(event.position)
@@ -78,6 +85,7 @@ func _outline(points: PackedVector2Array, color: Color, width: float = 1) -> voi
 	draw_polyline(closed, color, width, true)
 
 
+## queue_redraw 后由 Godot 调用；按地面、道路、建筑、预览顺序绘制，不修改玩法状态。
 func _draw() -> void:
 	if GameState.cave_config.is_empty():
 		return
@@ -131,6 +139,7 @@ func _draw() -> void:
 		ghost_type = str(moving.type)
 	if mode in ["build", "move"] and GameState.phase == GameState.Phase.FREE:
 		var data: Dictionary = GameState.cave_config.buildings[ghost_type]
+		# 绿色仅表示占地合法，不保证材料或容量足够；实际操作仍由规则层完整校验。
 		var valid: bool = GameState.Cave.placement_error(ghost_type, hover_cell, selected_id if mode == "move" else -1).is_empty()
 		var footprint := Vector2(data.size[0], data.size[1])
 		var tile := _footprint(Vector2(hover_cell), footprint)
@@ -159,6 +168,7 @@ func _sprite_index(data: Dictionary) -> int:
 	return index
 
 
+## 图像可超出地面占地；绘制与像素命中共用此矩形，避免缩放后“看得到却点不中”。
 func structure_rect(point: Vector2, footprint: Vector2) -> Rect2:
 	var center := project(point + footprint / 2.0)
 	var width := cell_size() * (footprint.x + footprint.y) * 0.49
@@ -167,6 +177,7 @@ func structure_rect(point: Vector2, footprint: Vector2) -> Rect2:
 	return Rect2(center.x - width / 2.0, bottom - height, width, height)
 
 
+## 按占地远端的深度从后往前画；复制数组排序，不改变真实生产分料顺序。
 func _sorted_buildings() -> Array:
 	var buildings: Array = GameState.cave.buildings.duplicate()
 	buildings.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:

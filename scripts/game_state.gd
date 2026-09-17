@@ -3,6 +3,7 @@ extends Node
 # 本局状态只有一份；UI 读取它，ScheduleManager 提交培养与活动结果。
 # 尚未实现剧情、存档和继承选择，不保留旧月份和经验条逻辑。
 signal state_changed
+# phase 是本回合的操作阶段；growth_phase() 才是用于日程开放和立绘的成长阶段。
 enum Phase { FREE, RESOLVING, RESULTS, FINISHED }
 const CONFIG_PATH := "res://data/cultivation.json"
 const CAVE_CONFIG_PATH := "res://data/cave.json"
@@ -11,16 +12,19 @@ const RECIPES_PATH := "res://data/recipes.json"
 const Cave = preload("res://scripts/cave_rules.gd")
 const Content = preload("res://scripts/content_tables.gd")
 
+# 配置是内容模板；下方 inventory、cave 等才是会随玩家操作变化的本局数据。
 var config: Dictionary = {}
 var cave_config: Dictionary = {}
 var config_error := ""
 var cave: Dictionary = {}
 var last_production: Dictionary = {}
+# 生产提交标记与报告分开，避免重复确认同一回合时再次发放产物。
 var last_production_turn := 0
 var base_stats: Dictionary = {}
 # 只预留三件装备的属性贡献口径；完整换装系统尚未实现。
 var equipment_bonuses: Dictionary = {}
 var inventory: Dictionary = {}
+# 槽位保存活动 ID 而非按钮序号或中文名；空字符串表示尚未安排。
 var plan: Array[String] = []
 var last_results: Array[Dictionary] = []
 var phase := Phase.FREE
@@ -28,9 +32,11 @@ var turn := 1
 var energy := 0
 var pressure := 0
 var schedule_slots := 3
+# 培养共用这一份随机源；界面预览不能消耗它，否则开关菜单也会改变结果。
 var rng := RandomNumberGenerator.new()
 
 
+## Autoload 先于主场景初始化；配置失败时直接停止，避免用半份配置继续运行。
 func _ready() -> void:
 	config_error = _load_configs()
 	if not config_error.is_empty():
@@ -64,6 +70,7 @@ func _load_configs() -> String:
 	return error if not error.is_empty() else validate_cave_config()
 
 
+## 校验培养表及其物品引用；返回空字符串表示通过，否则返回首个可定位的问题。
 func validate_config() -> String:
 	for key in ["rules", "groups", "items", "initial_inventory"]:
 		if not config.get(key) is Dictionary:
@@ -95,6 +102,7 @@ func validate_config() -> String:
 	if config.outcomes.size() != 3:
 		return "需要大成功、成功、失败三种结果"
 	var boundary := 0
+	# 压力档为左闭右开区间，最后必须到 101，才能包含合法的压力值 100。
 	for band in config.pressure_bands:
 		if int(band.min) != boundary or int(band.max_exclusive) <= boundary:
 			return "压力区间必须连续且不能重叠"
@@ -133,11 +141,13 @@ func validate_config() -> String:
 	return ""
 
 
+## 从已加载的配置创建新局，不重新读取 JSON。传入非负种子可复现培养结果。
 func reset_game(random_seed: int = -1) -> void:
 	base_stats.clear()
 	for key in stat_names():
 		base_stats[key] = int(config.rules.initial_attribute)
 	equipment_bonuses = {"weapon": {}, "armor": {}, "accessory": {}}
+	# Dictionary/Array 默认共享引用；深复制避免游戏消耗反过来修改开局模板。
 	inventory = config.initial_inventory.duplicate(true)
 	schedule_slots = int(config.rules.schedule_slots)
 	turn = 1
@@ -153,6 +163,7 @@ func reset_game(random_seed: int = -1) -> void:
 		cave.roads.append(Vector2i(int(cell[0]), int(cell[1])))
 	for source in cave_config.workers:
 		var worker: Dictionary = source.duplicate(true)
+		# 工作归属只保存在御灵上；-1 表示待命，建筑不再保存第二份派工列表。
 		worker.building_id = -1
 		worker.slot = -1
 		cave.workers.append(worker)
@@ -165,6 +176,7 @@ func reset_game(random_seed: int = -1) -> void:
 	state_changed.emit()
 
 
+## 先验证配方中的物品，再验证建筑可用配方，保证后续跨表查询有合法目标。
 func validate_cave_config() -> String:
 	for key in ["buildings", "recipes"]:
 		if not cave_config.get(key) is Dictionary or cave_config[key].is_empty():
@@ -239,6 +251,7 @@ func validate_cave_config() -> String:
 	return ""
 
 
+## 只检查指定库存是否够用；可用于真实库存，也可用于生产预测的临时预算。
 func cost_error(costs: Dictionary, stock: Dictionary) -> String:
 	for key in costs:
 		if int(stock.get(key, 0)) < int(costs[key]):
@@ -246,6 +259,7 @@ func cost_error(costs: Dictionary, stock: Dictionary) -> String:
 	return ""
 
 
+## 真正扣除本局库存。调用者必须先检查全部成本；这里不校验、不广播刷新。
 func pay_costs(costs: Dictionary) -> void:
 	for key in costs:
 		inventory[key] = int(inventory.get(key, 0)) - int(costs[key])
@@ -277,6 +291,7 @@ func group_total(group_id: String, with_equipment: bool = false) -> int:
 	return value
 
 
+## 将从 1 开始的回合映射为 0/1/2；这些内部阶段不等于界面应显示的年龄。
 func growth_phase() -> int:
 	var boundary := 0
 	for i in range(config.rules.phase_turns.size()):
@@ -293,6 +308,7 @@ func total_turns() -> int:
 	return total
 
 
+## 仅从结果阶段前进；保留属性、压力、库存和洞天安排，清空女儿日程草稿。
 func advance_turn() -> bool:
 	if phase != Phase.RESULTS:
 		return false

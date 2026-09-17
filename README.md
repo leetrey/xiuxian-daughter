@@ -55,6 +55,10 @@ godot --path "/Users/leet/WorkBuddy/独立" res://scenes/smoke_test.tscn -- --ui
 
 会导出实际窗口截图，包括家园、三阶段立绘、人物与自由活动菜单、日程与结果、小窗口五槽、洞天建造派工、闲置弹窗、七种建筑与宽屏场景，然后自动退出。不启用截图参数时无需窗口。
 
+## 开发与调试
+
+需要了解如何开发、调试和补测试，先看 [07 开发与调试手册](docs/07-development-handbook.md)。包含 VS Code/Godot 配合、调用链、断点位置和常见问题排查。
+
 ## 修改配置
 
 作者从 [内容填写指南](docs/06-content-authoring.md) 开始；程序提供通用框架和少量例子，具体药材、丹方、数值与文案由作者填写。

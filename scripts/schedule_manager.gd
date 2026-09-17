@@ -2,11 +2,13 @@ extends Node
 
 # 两类活动共用定义，只有自由活动扣精力。草稿不产生收益。
 # 先完整校验日程，再锁住阶段结算，防止重复点击或部分扣费。
+# 阅读主线：assign_slot -> plan_error -> confirm_schedule -> Cave.settle。
 
 func activities(kind: String) -> Array:
 	return GameState.config.activities.filter(func(a: Dictionary) -> bool: return a.kind == kind)
 
 
+## 返回配置中的原字典，不是副本；运行流程只读它，测试修改后必须恢复。
 func activity_by_id(id: String) -> Dictionary:
 	for activity in GameState.config.activities:
 		if activity.id == id:
@@ -22,6 +24,7 @@ func availability(activity: Dictionary) -> String:
 	return ""
 
 
+## 编辑草稿，不扣资源、不掷骰。index 从 0 开始；空 id 用来清空槽位。
 func assign_slot(index: int, id: String) -> String:
 	if GameState.phase != GameState.Phase.FREE:
 		return "日程已确认"
@@ -64,6 +67,7 @@ func pressure_band(value: int) -> Dictionary:
 	return {}
 
 
+## roll 由调用者提供；函数本身不推进 RNG，方便精确验证概率分界。
 func outcome_for_roll(value: int, roll: float) -> Dictionary:
 	# 独立选择函数允许直接测试概率边界，不必大量随机重跑。
 	var cumulative := 0.0
@@ -75,6 +79,7 @@ func outcome_for_roll(value: int, roll: float) -> Dictionary:
 	return GameState.config.outcomes.back()
 
 
+## 聚合整份草稿的材料再检查，不能逐槽检查后边执行边发现缺料。
 func plan_error() -> String:
 	if GameState.phase != GameState.Phase.FREE:
 		return "本回合已结算"
@@ -103,6 +108,8 @@ func plan_error() -> String:
 	return _cost_error(costs)
 
 
+## 本回合培养的提交入口。闲置提示只返回 needs_confirmation，不产生任何收益。
+## 只有玩家明确继续后才传 ignore_idle=true，其他规则仍会重新校验。
 func confirm_schedule(ignore_idle: bool = false) -> Dictionary:
 	var error := plan_error()
 	if not error.is_empty():
@@ -113,6 +120,7 @@ func confirm_schedule(ignore_idle: bool = false) -> Dictionary:
 		if idle.size() > 6:
 			summary += "\n另有 %d 栋，共 %d 栋" % [idle.size() - 6, idle.size()]
 		return {"ok": false, "needs_confirmation": true, "message": summary}
+	# 在扣费和掷骰之前锁定阶段；规则层也检查阶段，不只依赖按钮禁用。
 	GameState.phase = GameState.Phase.RESOLVING
 	GameState.last_results.clear()
 	for id in GameState.plan:
@@ -120,6 +128,7 @@ func confirm_schedule(ignore_idle: bool = false) -> Dictionary:
 			continue
 		var activity := activity_by_id(id)
 		var before: int = GameState.pressure
+		# 下一槽读取上一槽更新后的压力，不能把整份日程套用同一个概率档。
 		var outcome := outcome_for_roll(before, GameState.rng.randf())
 		_pay_costs(activity.get("costs", {}))
 		var gains := _apply_growth(activity.growth, float(outcome.multiplier))
@@ -152,6 +161,7 @@ func free_action_error(id: String) -> String:
 	return _cost_error(activity.get("costs", {}))
 
 
+## 自由活动立即生效，按配置扣精力和物品；不占槽，也不使用培养随机倍率。
 func execute_free_action(id: String) -> Dictionary:
 	var error := free_action_error(id)
 	if not error.is_empty():
@@ -174,6 +184,7 @@ func _pay_costs(costs: Dictionary) -> void:
 	GameState.pay_costs(costs)
 
 
+## 每项细分属性先乘倍率再单独取整；返回实际增量，札记不必重新计算。
 func _apply_growth(growth: Dictionary, multiplier: float) -> Dictionary:
 	var gains: Dictionary = {}
 	for key in growth:

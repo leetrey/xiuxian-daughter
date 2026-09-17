@@ -2,6 +2,7 @@ extends RefCounted
 
 # 普通脚本，不新增 Autoload。所有位置、分配与产出只修改 GameState 中的洞天。
 # 预览返回纯结果；提交结算才扣库存。道路为四向连通，资源按建筑 ID 顺序分配。
+# definition 读取建筑类型模板，find_building 返回本局某一栋实例；二者不可混写。
 const NEIGHBORS := [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]
 
 
@@ -9,6 +10,7 @@ static func definition(building: Dictionary) -> Dictionary:
 	return GameState.cave_config.buildings[building.type]
 
 
+## 返回本局建筑的原字典，修改字段会写回 GameState；预演操作须先深复制。
 static func find_building(id: int) -> Dictionary:
 	for building in GameState.cave.buildings:
 		if int(building.id) == id:
@@ -16,6 +18,7 @@ static func find_building(id: int) -> Dictionary:
 	return {}
 
 
+## position 是逻辑左上格，size 是格数；规则层不使用等距画面的像素坐标。
 static func cells(building: Dictionary) -> Array[Vector2i]:
 	var occupied: Array[Vector2i] = []
 	var footprint: Array = definition(building).size
@@ -40,6 +43,7 @@ static func building_at(cell: Vector2i) -> Dictionary:
 	return {}
 
 
+## 从入口广度优先遍历四向道路；seen 同时作为去重集合和有效路网查询表。
 static func connected_roads(roads: Array) -> Dictionary:
 	var seen: Dictionary = {entrance(): true}
 	var frontier: Array[Vector2i] = [entrance()]
@@ -82,6 +86,7 @@ static func residents(world: Dictionary) -> int:
 	return count
 
 
+## 只检查占地。移动时排除自身原占地；材料和民居容量由实际操作入口另查。
 static func placement_error(type: String, position: Vector2i, moving_id: int = -1) -> String:
 	if not GameState.cave_config.buildings.has(type):
 		return "未知建筑"
@@ -97,6 +102,7 @@ static func placement_error(type: String, position: Vector2i, moving_id: int = -
 	return ""
 
 
+## 校验成功才扣建材和创建实例；稳定 id 不随移动变化，也用于生产分料排序。
 static func build(type: String, position: Vector2i) -> Dictionary:
 	if GameState.phase != GameState.Phase.FREE:
 		return _result(false, "本回合管理已结束")
@@ -124,6 +130,7 @@ static func move_building(id: int, position: Vector2i) -> Dictionary:
 	var error := placement_error(str(building.type), position, id)
 	if not error.is_empty():
 		return _result(false, error)
+	# 先在副本中验证搬迁后的连通容量，不通过时真实位置和御灵安排完全不动。
 	var proposed: Dictionary = GameState.cave.duplicate(true)
 	for item in proposed.buildings:
 		if int(item.id) == id:
@@ -135,6 +142,7 @@ static func move_building(id: int, position: Vector2i) -> Dictionary:
 	return _result(true, "位置已更新")
 
 
+## 增删道路也先预演容量，防止拆路后已工作的御灵失去民居名额。
 static func toggle_road(cell: Vector2i) -> Dictionary:
 	if GameState.phase != GameState.Phase.FREE:
 		return _result(false, "本回合管理已结束")
@@ -163,6 +171,7 @@ static func set_recipe(id: int, recipe: String) -> Dictionary:
 	return _result(true, "生产安排已更新")
 
 
+## slot 从 0 开始，空 worker_id 表示撤下。先清目标槽，再改该御灵唯一的归属。
 static func assign_worker(building_id: int, slot: int, worker_id: String) -> Dictionary:
 	if GameState.phase != GameState.Phase.FREE:
 		return _result(false, "本回合管理已结束")
@@ -189,6 +198,7 @@ static func assign_worker(building_id: int, slot: int, worker_id: String) -> Dic
 	return _result(true, "御灵分配已更新")
 
 
+## 只提醒未选生产任务的建筑；没有御灵但已选任务，仍可按基础产出生产。
 static func idle_buildings() -> Array[String]:
 	var names: Array[String] = []
 	for building in GameState.cave.buildings:
@@ -197,6 +207,7 @@ static func idle_buildings() -> Array[String]:
 	return names
 
 
+## 比较所有占地格，取最近距离而非中心距离，让大型建筑也按边界接受景观加成。
 static func distance(first: Dictionary, second: Dictionary) -> int:
 	var shortest := 100000
 	for a in cells(first):
@@ -229,6 +240,8 @@ static func multipliers(building: Dictionary) -> Dictionary:
 	return {"workers": worker_factor, "landscape": landscape_factor, "groups": groups}
 
 
+## 只读当前布局与传入库存，返回逐栋 rows、总消耗 consumed 和总产出 produced。
+## 预览和真实结算共用此函数，避免界面显示与到账结果使用两套公式。
 static func forecast(stock: Dictionary) -> Dictionary:
 	# budget 只减投入，outputs 单独累积；同批新产出绝不成为下一栋的原料。
 	var budget: Dictionary = stock.duplicate()
@@ -236,6 +249,7 @@ static func forecast(stock: Dictionary) -> Dictionary:
 	var produced: Dictionary = {}
 	var rows: Array[Dictionary] = []
 	var ordered: Array = GameState.cave.buildings.duplicate()
+	# 绘制可以按前后遮挡排序，但缺料分配顺序必须始终按建造 id，不能随位置变化。
 	ordered.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return int(a.id) < int(b.id))
 	var network := connected_roads(GameState.cave.roads)
 	for building in ordered:
@@ -251,6 +265,7 @@ static func forecast(stock: Dictionary) -> Dictionary:
 			var recipe: Dictionary = GameState.cave_config.recipes[building.recipe]
 			row.reason = GameState.cost_error(recipe.inputs, budget)
 			if str(row.reason).is_empty():
+				# 全部原料都够才扣本栋预算；缺一种时整单停产，不先扣另一种。
 				row.inputs = recipe.inputs.duplicate()
 				for key in recipe.inputs:
 					var amount := int(recipe.inputs[key])
@@ -276,6 +291,7 @@ static func preview() -> Dictionary:
 	return forecast(stock)
 
 
+## 唯一的生产入库入口；阶段和回合标记共同防重，最后由培养流程统一发刷新信号。
 static func settle() -> Dictionary:
 	if GameState.phase != GameState.Phase.RESOLVING or GameState.last_production_turn == GameState.turn:
 		return _result(false, "生产已结算或不在结算阶段")
