@@ -23,6 +23,9 @@ var story: Dictionary = {}
 var unlocked_activities: Array[String] = []
 # 活动 ID -> 最早生效回合；与剧情完成记录分开，不能用已读节点冒充已经开放。
 var pending_activity_unlocks: Dictionary = {}
+# 图纸不进入物品库存、不按建造次数消耗，也不代表土地或剧情已经推进。
+var unlocked_blueprints: Array[String] = []
+var pending_blueprint_unlocks: Dictionary = {}
 var config_error := ""
 # 只有全部配置检查返回成功才置真，防止脚本异常中断加载后仍打印校验成功。
 var configs_validated := false
@@ -48,7 +51,9 @@ var rng := RandomNumberGenerator.new()
 
 ## Autoload 先于主场景初始化；配置失败时直接停止，避免用半份配置继续运行。
 func _ready() -> void:
-	config_error = _load_configs()
+	# 加载函数意外中断时也走失败出口，不对异常返回值继续调用字符串方法。
+	var load_error: Variant = _load_configs()
+	config_error = load_error if load_error is String else "配置加载异常中断，请检查前面的脚本错误"
 	if not configs_validated and config_error.is_empty():
 		config_error = "配置初始化未完成，请检查前面的脚本错误"
 	if not config_error.is_empty():
@@ -86,7 +91,7 @@ func _load_configs() -> String:
 	error = validate_cave_config()
 	if not error.is_empty():
 		return error
-	error = Story.validate_config(story_config, config.items, config.activities)
+	error = Story.validate_config(story_config, config.items, config.activities, cave_config.buildings)
 	if not error.is_empty():
 		return error
 	# 标记放在加载函数末尾；若此函数直接因脚本异常中断，调用方不能替它宣布成功。
@@ -109,39 +114,78 @@ func validate_config() -> String:
 	if not content_error.is_empty():
 		return content_error
 	var rules: Dictionary = config.rules
-	if int(rules.get("schedule_slots", 0)) < 3 or int(rules.get("schedule_slots", 0)) > 5:
-		return "培养槽数量必须为 3 至 5"
+	for key in ["schedule_slots", "max_energy", "initial_attribute", "initial_pressure"]:
+		if not Content.is_integer(rules.get(key)) or float(rules[key]) < 0:
+			return "data/cultivation.json rules.%s: 需要非负整数" % key
+	if rules.schedule_slots < 3 or rules.schedule_slots > 5:
+		return "data/cultivation.json rules.schedule_slots: 培养槽数量必须为 3 至 5"
+	for key in ["require_full_schedule", "allow_repeat"]:
+		if not rules.get(key) is bool:
+			return "data/cultivation.json rules.%s: 需要布尔值" % key
 	if not rules.get("phase_turns") is Array or rules.phase_turns.size() != 3:
 		return "必须配置三个成长阶段"
 	for length in rules.phase_turns:
-		if int(length) <= 0:
-			return "阶段回合数必须为正数"
-	if int(rules.get("max_energy", -1)) < 0 or int(rules.get("initial_attribute", -1)) < 0:
-		return "精力与初始属性不能为负"
+		if not Content.is_integer(length) or float(length) <= 0:
+			return "data/cultivation.json rules.phase_turns: 阶段回合数必须为正整数"
 	if not ["round", "floor"].has(rules.get("rounding", "")):
 		return "取整只支持 round 或 floor"
-	var names := stat_names()
+	# 不调用尚未验证数据的 stat_names()，先逐层检查再汇总，避免 merge() 被坏类型击穿。
+	var names: Dictionary = {}
+	for group_id in config.groups:
+		var group: Variant = config.groups[group_id]
+		var path := "data/cultivation.json groups." + str(group_id)
+		if not group is Dictionary:
+			return path + ": 需要对象"
+		if not group.get("name") is String or str(group.name).strip_edges().is_empty():
+			return path + ".name: 需要非空名称"
+		if not group.get("stats") is Dictionary:
+			return path + ".stats: 需要对象"
+		for key in group.stats:
+			if not key is String or str(key).strip_edges().is_empty() or names.has(key):
+				return path + ".stats: 属性 ID 必须非空且不能跨组重复"
+			if not group.stats[key] is String or str(group.stats[key]).strip_edges().is_empty():
+				return path + ".stats." + str(key) + ": 需要非空名称"
+			names[key] = group.stats[key]
 	if names.size() != 16:
 		return "需要 16 项细分属性"
 	if config.outcomes.size() != 3:
 		return "需要大成功、成功、失败三种结果"
+	for index in range(config.outcomes.size()):
+		var outcome: Variant = config.outcomes[index]
+		var path := "data/cultivation.json outcomes[%d]" % index
+		if not outcome is Dictionary:
+			return path + ": 需要对象"
+		if not outcome.get("name") is String or str(outcome.name).strip_edges().is_empty():
+			return path + ".name: 需要非空名称"
+		if not Content.is_number(outcome.get("multiplier")) or float(outcome.multiplier) < 0:
+			return path + ".multiplier: 需要非负有限数值"
 	var boundary := 0
 	# 压力档为左闭右开区间，最后必须到 101，才能包含合法的压力值 100。
-	for band in config.pressure_bands:
+	for index in range(config.pressure_bands.size()):
+		var band: Variant = config.pressure_bands[index]
+		var path := "data/cultivation.json pressure_bands[%d]" % index
+		if not band is Dictionary:
+			return path + ": 需要对象"
+		for key in ["min", "max_exclusive"]:
+			if not Content.is_integer(band.get(key)) or float(band[key]) < 0 or float(band[key]) > 101:
+				return path + "." + key + ": 需要 0 至 101 的整数"
 		if int(band.min) != boundary or int(band.max_exclusive) <= boundary:
-			return "压力区间必须连续且不能重叠"
+			return path + ": 压力区间必须连续且不能重叠"
 		boundary = int(band.max_exclusive)
+		if not band.get("probabilities") is Array:
+			return path + ".probabilities: 需要数组"
 		if band.probabilities.size() != config.outcomes.size():
-			return "结果与概率数量不一致"
+			return path + ".probabilities: 结果与概率数量不一致"
 		var total := 0.0
-		for probability in band.probabilities:
-			if float(probability) < 0.0:
-				return "概率不能为负数"
+		for probability_index in range(band.probabilities.size()):
+			var probability: Variant = band.probabilities[probability_index]
+			if not Content.is_number(probability) or float(probability) < 0.0 or float(probability) > 1.0:
+				return path + ".probabilities[%d]: 需要 0 至 1 的有限数值" % probability_index
 			total += float(probability)
 		if not is_equal_approx(total, 1.0):
-			return "每档概率之和必须为 1"
+			return path + ".probabilities: 每档概率之和必须为 1"
 	if boundary != 101:
-		return "压力区间必须覆盖 0 至 100"
+		return "data/cultivation.json pressure_bands: 压力区间必须覆盖 0 至 100"
 	var ids: Array[String] = []
 	for activity in config.activities:
 		if not activity is Dictionary or not activity.get("id") is String or str(activity.id).is_empty():
@@ -149,18 +193,20 @@ func validate_config() -> String:
 		var path := "data/cultivation.json activities." + str(activity.id)
 		if not activity.get("name") is String or str(activity.name).strip_edges().is_empty():
 			return path + ".name: 需要非空名称"
-		if not activity.get("growth") is Dictionary or not (activity.get("pressure") is int or activity.get("pressure") is float):
+		if not activity.get("growth") is Dictionary or not Content.is_number(activity.get("pressure")):
 			return path + ": 需要 growth 对象与 pressure 数值"
 		if ids.has(str(activity.id)) or not ["schedule", "free"].has(activity.get("kind")):
 			return "活动 ID 重复或类型错误"
 		ids.append(str(activity.id))
-		if int(activity.get("energy_cost", 0)) < 0:
-			return "活动精力成本不能为负"
+		if not Content.is_integer(activity.get("energy_cost", 0)) or float(activity.get("energy_cost", 0)) < 0:
+			return path + ".energy_cost: 需要非负整数"
+		if not Content.is_integer(activity.get("min_phase", 0)) or not [0, 1, 2].has(int(activity.get("min_phase", 0))):
+			return path + ".min_phase: 需要 0、1 或 2"
 		if activity.has("requires_unlock") and not activity.requires_unlock is bool:
 			return path + ".requires_unlock: 需要布尔值"
 		for key in activity.growth:
-			if not names.has(key) or float(activity.growth[key]) < 0:
-				return "活动成长引用了未知属性或负数: " + str(key)
+			if not names.has(key) or not Content.is_number(activity.growth[key]) or float(activity.growth[key]) < 0:
+				return path + ".growth." + str(key) + ": 需要已知属性的非负有限数值"
 		content_error = Content.validate_amounts(activity.get("costs", {}), config.items, path + ".costs")
 		if not content_error.is_empty():
 			return content_error
@@ -198,6 +244,8 @@ func reset_game(random_seed: int = -1) -> void:
 	story = {"completed": {}, "checked": {}, "checkpoint": "", "kind": "", "active": {}, "results": []}
 	unlocked_activities.clear()
 	pending_activity_unlocks.clear()
+	unlocked_blueprints.assign(cave_config.initial_blueprints)
+	pending_blueprint_unlocks.clear()
 	if random_seed < 0:
 		rng.randomize()
 	else:
@@ -211,6 +259,9 @@ func validate_cave_config() -> String:
 		if not cave_config.get(key) is Dictionary or cave_config[key].is_empty():
 			return "洞天配置缺少非空对象: " + key
 	var content_error := Content.validate_recipes(cave_config.recipes, config.items)
+	if not content_error.is_empty():
+		return content_error
+	content_error = Content.validate_blueprints(cave_config.get("initial_blueprints"), cave_config.buildings, "data/cave.json initial_blueprints")
 	if not content_error.is_empty():
 		return content_error
 	for key in ["entrance", "initial_roads", "workers"]:
@@ -239,6 +290,10 @@ func validate_cave_config() -> String:
 		var path := "data/cave.json buildings." + str(building_id)
 		if not building is Dictionary:
 			return path + ": 建筑必须为对象"
+		if building.has("sprite_index"):
+			var sprite_count: int = Content.BUILDING_ATLAS_GRID.x * Content.BUILDING_ATLAS_GRID.y
+			if not Content.is_integer(building.sprite_index) or float(building.sprite_index) < 0 or float(building.sprite_index) >= sprite_count:
+				return path + ".sprite_index: 需要 0 至 %d 的整数" % (sprite_count - 1)
 		if not building.get("size") is Array or building.size.size() != 2:
 			return "建筑占地需要宽高两个值"
 		if not building.get("costs") is Dictionary or not building.get("recipes") is Array:
@@ -364,6 +419,6 @@ func advance_turn() -> bool:
 		StoryFlow.apply_pending_unlocks()
 		# 压力不在此恢复；未来回合末天赋应在独立结算位置执行。
 		StoryFlow.begin("turn_start")
-		return true
+	# 回合推进自己保证通知；即使剧情检查点已处理、begin() 提前返回，界面仍会更新。
 	state_changed.emit()
 	return true

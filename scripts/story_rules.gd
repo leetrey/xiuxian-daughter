@@ -9,7 +9,7 @@ const STAGES := ["0", "1", "2"]
 
 
 ## 配置先整体通过校验，再用于条件查询；空字符串表示通过。
-static func validate_config(config: Dictionary, items: Dictionary, activities: Array = []) -> String:
+static func validate_config(config: Dictionary, items: Dictionary, activities: Array = [], buildings: Dictionary = {}) -> String:
 	var path := "data/story.json"
 	var error := _unknown_fields(config, ["version", "note", "nodes"], path)
 	if not error.is_empty():
@@ -30,7 +30,7 @@ static func validate_config(config: Dictionary, items: Dictionary, activities: A
 		if by_id.has(node.id):
 			return location + ".id: 剧情 ID 重复"
 		by_id[node.id] = node
-		error = _validate_node(node, items, activities, location)
+		error = _validate_node(node, items, activities, buildings, location)
 		if not error.is_empty():
 			return error
 	# 第二遍检查引用，允许前置节点写在本节点之后，数组位置不代表剧情先后。
@@ -52,7 +52,7 @@ static func validate_config(config: Dictionary, items: Dictionary, activities: A
 	return ""
 
 
-static func _validate_node(node: Dictionary, items: Dictionary, activities: Array, path: String) -> String:
+static func _validate_node(node: Dictionary, items: Dictionary, activities: Array, buildings: Dictionary, path: String) -> String:
 	var error := _unknown_fields(node, ["id", "name", "note", "enabled", "kind", "order", "checkpoints", "requires_completed", "excludes_completed", "conditions", "variants", "costs", "rewards"], path)
 	if not error.is_empty():
 		return error
@@ -101,7 +101,7 @@ static func _validate_node(node: Dictionary, items: Dictionary, activities: Arra
 	var rewards = node.get("rewards", {})
 	if not rewards is Dictionary:
 		return path + ".rewards: 需要对象"
-	error = _unknown_fields(rewards, ["items", "activities", "unlock_timing"], path + ".rewards")
+	error = _unknown_fields(rewards, ["items", "activities", "blueprints", "unlock_timing"], path + ".rewards")
 	if not error.is_empty():
 		return error
 	error = Content.validate_amounts(rewards.get("items", {}), items, path + ".rewards.items", false)
@@ -116,6 +116,9 @@ static func _validate_node(node: Dictionary, items: Dictionary, activities: Arra
 	for id in rewards.get("activities", []):
 		if not activity_ids.has(id):
 			return path + ".rewards.activities: 未知活动 " + str(id)
+	error = Content.validate_blueprints(rewards.get("blueprints", []), buildings, path + ".rewards.blueprints")
+	if not error.is_empty():
+		return error
 	if not ["immediate", "next_turn"].has(rewards.get("unlock_timing", "next_turn")):
 		return path + ".rewards.unlock_timing: 只支持 immediate 或 next_turn"
 	if not node.get("variants") is Dictionary:
@@ -252,7 +255,7 @@ static func presentation(config: Dictionary, id: String, growth_phase: int) -> D
 static func _unknown_fields(data: Dictionary, allowed: Array, path: String) -> String:
 	for key in data:
 		if not allowed.has(key):
-			return path + "." + str(key) + ": 未支持的字段，请检查拼写；土地、图纸、选择与并发组尚未接入"
+			return path + "." + str(key) + ": 未支持的字段，请检查拼写；土地、选择与并发组尚未接入"
 	return ""
 
 

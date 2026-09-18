@@ -468,12 +468,7 @@ func _refresh() -> void:
 	if stage != portrait_stage:
 		# AtlasTexture 取同一张透明图集的一个等宽区域，不在磁盘生成三份裁切图。
 		portrait_stage = stage
-		var atlas := AtlasTexture.new()
-		atlas.atlas = load("res://assets/daughter_stages.png")
-		var strip_width := atlas.atlas.get_width() / 3.0
-		atlas.region = Rect2(stage * strip_width, 0, strip_width, atlas.atlas.get_height())
-		atlas.filter_clip = true
-		portrait.texture = atlas
+		portrait.texture = ThemeKit.daughter_portrait(stage)
 	for i in range(selectors.size()):
 		var picker: OptionButton = selectors[i]
 		picker.disabled = not editable
@@ -547,6 +542,8 @@ func _refresh() -> void:
 			report += "\n%s +%d" % [GameState.config.items[id].name, int(entry.rewards.items[id])]
 		for id in entry.rewards.get("activities", []):
 			report += "\n%s · %s" % [ScheduleManager.activity_by_id(str(id)).name, "下回合开放" if entry.rewards.get("unlock_timing", "next_turn") == "next_turn" else "已解锁"]
+		for id in entry.rewards.get("blueprints", []):
+			report += "\n%s图纸 · %s" % [GameState.cave_config.buildings[id].name, "下回合可用" if entry.rewards.get("unlock_timing", "next_turn") == "next_turn" else "已掌握"]
 	results.text = report
 	if active_menu == "work":
 		modal_title.text = "培养日程" if editable else "成长札记"

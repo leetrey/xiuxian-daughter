@@ -195,13 +195,23 @@ func _refresh() -> void:
 	if board == null:
 		return
 	var editable: bool = GameState.phase == GameState.Phase.FREE
-	if not editable:
+	var blueprint_reason: String = GameState.Cave.blueprint_error(str(catalog.get_selected_metadata()))
+	if not editable or (current_mode == "build" and not blueprint_reason.is_empty()):
 		current_mode = "select"
 	for id in mode_buttons:
 		# 刷新选中外观时不再触发模式切换信号，避免 UI 与回调互相调用。
 		mode_buttons[id].set_pressed_no_signal(id == current_mode)
 		mode_buttons[id].disabled = not editable and id != "select"
+	mode_buttons.build.disabled = not editable or not blueprint_reason.is_empty()
+	mode_buttons.build.tooltip_text = "放置建筑" if blueprint_reason.is_empty() else blueprint_reason
 	catalog.disabled = not editable
+	# 锁定项仍可选中查看条件；真正的建造资格也由规则层校验，不能只禁用按钮。
+	for index in range(catalog.item_count):
+		var type := str(catalog.get_item_metadata(index))
+		var reason: String = GameState.Cave.blueprint_error(type)
+		var name := str(GameState.cave_config.buildings[type].name)
+		catalog.set_item_text(index, name if reason.is_empty() else name + " · " + reason)
+		catalog.get_popup().set_item_tooltip(index, reason)
 	board.mode = current_mode
 	board.build_type = str(catalog.get_selected_metadata())
 	if GameState.Cave.find_building(selected_id).is_empty():
@@ -216,6 +226,8 @@ func _refresh() -> void:
 	inventory_label.tooltip_text = inventory_label.text
 	var data: Dictionary = GameState.cave_config.buildings[board.build_type]
 	cost_label.text = "%s  %d×%d  ·  %s" % [data.name, int(data.size[0]), int(data.size[1]), _amounts(data.costs)]
+	if not blueprint_reason.is_empty():
+		cost_label.text = blueprint_reason + "\n" + cost_label.text
 	population_label.text = "入住 %d / %d  ·  御灵 %d" % [
 		GameState.Cave.residents(GameState.cave), GameState.Cave.capacity(GameState.cave), GameState.cave.workers.size()]
 	# 自由阶段显示预测；结算后读保存的报告，不能用已经入库的库存重算本回合。

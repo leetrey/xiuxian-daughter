@@ -7,6 +7,9 @@ var ui_completed := false
 var story_completed := false
 var story_flow_completed := false
 var story_ui_completed := false
+var review_regressions_completed := false
+var blueprints_completed := false
+var blueprint_ui_completed := false
 
 
 ## 默认只跑规则；带截图参数时才创建界面。退出码便于终端判断，不只依赖最后一行文字。
@@ -19,6 +22,8 @@ func _ready() -> void:
 	var story_config: Dictionary = GameState.story_config
 	GameState.story_config = {"version": 1, "nodes": []}
 	_run_content_rules()
+	_run_review_regressions()
+	_check(review_regressions_completed, "配置与贴图回归必须完整执行，脚本中断不得报成功")
 	_run_story_rules(story_config)
 	_check(story_completed, "剧情规则测试必须完整执行，脚本中断不得报成功")
 	_run_rules()
@@ -30,10 +35,14 @@ func _ready() -> void:
 	GameState.story_config = story_config
 	_run_story_flow()
 	_check(story_flow_completed, "剧情执行测试必须完整执行")
+	_run_blueprints()
+	_check(blueprints_completed, "图纸规则测试必须完整执行")
 	for argument in OS.get_cmdline_user_args():
 		if argument.begins_with("--ui-snapshot="):
 			await _capture_story_ui(argument.trim_prefix("--ui-snapshot="))
 			_check(story_ui_completed, "剧情窗口走查必须完整执行")
+			await _capture_blueprint_ui(argument.trim_prefix("--ui-snapshot="))
+			_check(blueprint_ui_completed, "图纸窗口走查必须完整执行")
 	if failures == 0:
 		print("SMOKE_TEST_OK")
 	else:
@@ -50,6 +59,109 @@ func _check(condition: bool, message: String) -> void:
 func _fill(id: String = "sword") -> void:
 	for i in range(GameState.schedule_slots):
 		_check(ScheduleManager.assign_slot(i, id).is_empty(), "安排日程")
+
+
+## 坏配置只改深复制的内存表；保留 Variant 返回值检查，异常中断不能被当成校验通过。
+func _run_review_regressions() -> void:
+	var config: Dictionary = GameState.config.duplicate(true)
+	var cases: Array[Dictionary] = []
+	for value in [null, "bad", [], {}, true]:
+		cases.append({"keys": ["pressure_bands", 0], "value": value, "error": "pressure_bands[0]"})
+	for field in ["min", "max_exclusive"]:
+		for value in [null, "20", true, [], {}, -1, 0.5, 102, INF, NAN]:
+			cases.append({"keys": ["pressure_bands", 0, field], "value": value, "error": "pressure_bands[0]." + field})
+	for value in [null, "bad", {}, true, [], [0.5, 0.5], [0.3, 0.3, 0.3]]:
+		cases.append({"keys": ["pressure_bands", 0, "probabilities"], "value": value, "error": "pressure_bands[0].probabilities"})
+	for value in [null, "0.34", true, [], {}, -0.1, 1.1, INF, NAN]:
+		cases.append({"keys": ["pressure_bands", 0, "probabilities", 0], "value": value, "error": "probabilities[0]"})
+	for value in [null, "bad", [], {}]:
+		cases.append({"keys": ["outcomes", 0], "value": value, "error": "outcomes[0]"})
+	for value in [null, "2.5", true, [], {}, -1, INF, NAN]:
+		cases.append({"keys": ["outcomes", 0, "multiplier"], "value": value, "error": "outcomes[0].multiplier"})
+	for value in [null, "bad", [], {}]:
+		cases.append({"keys": ["groups", "physique"], "value": value, "error": "groups.physique"})
+	cases.append({"keys": ["groups", "physique", "stats"], "value": [], "error": "groups.physique.stats"})
+	cases.append({"keys": ["rules", "phase_turns", 0], "value": "12", "error": "rules.phase_turns"})
+	cases.append({"keys": ["rules", "initial_pressure"], "value": {}, "error": "rules.initial_pressure"})
+	cases.append({"keys": ["rules", "allow_repeat"], "value": "true", "error": "rules.allow_repeat"})
+	cases.append({"keys": ["activities", 0, "growth", "power"], "value": {}, "error": "activities.sword.growth.power"})
+	for case in cases:
+		GameState.config = config.duplicate(true)
+		var parent: Variant = GameState.config
+		for index in range(case.keys.size() - 1):
+			parent = parent[case.keys[index]]
+		parent[case.keys.back()] = case.value
+		var error: Variant = GameState.validate_config()
+		_check(error is String and error.contains(case.error), "畸形配置返回字段错误: " + str(case.keys))
+	for field in ["min", "max_exclusive", "probabilities"]:
+		GameState.config = config.duplicate(true)
+		GameState.config.pressure_bands[0].erase(field)
+		var error: Variant = GameState.validate_config()
+		_check(error is String and error.contains("pressure_bands[0]." + field), "缺少压力档字段: " + field)
+	for boundary in [19, 21]:
+		GameState.config = config.duplicate(true)
+		GameState.config.pressure_bands[1].min = boundary
+		_check(GameState.validate_config().contains("pressure_bands[1]"), "压力档重叠或间断仍被拒绝")
+	GameState.config = config.duplicate(true)
+	GameState.config.pressure_bands.back().max_exclusive = 100
+	_check(not GameState.validate_config().is_empty(), "压力档必须覆盖压力 100")
+	GameState.config = config
+	_check(GameState.validate_config().is_empty(), "恢复后的培养表正常通过")
+
+	var building: Dictionary = GameState.cave_config.buildings.herb_field
+	var original_index: int = int(building.sprite_index)
+	for value in [-1, 8, 1.5, "1", true, null, [], {}, INF, NAN]:
+		building.sprite_index = value
+		var error: Variant = GameState.validate_cave_config()
+		_check(error is String and error.contains("buildings.herb_field.sprite_index"), "建筑图格拒绝错误类型及越界")
+	for index in range(8):
+		building.sprite_index = index
+		_check(GameState.validate_cave_config().is_empty(), "合法建筑图格可配置")
+	building.erase("sprite_index")
+	_check(GameState.validate_cave_config().is_empty(), "旧建筑允许省略图格")
+	var board: Control = load("res://scripts/cave_board.gd").new()
+	_check(board._sprite_index(building) == 1, "未配置图格仍沿用同类映射")
+	building.sprite_index = 6
+	_check(board._sprite_index(building) == 6, "显式图格优先于类别与工作类型")
+	building.sprite_index = original_index
+	board.free()
+
+	var visuals = preload("res://scripts/ui_theme.gd")
+	var sheet := GradientTexture2D.new()
+	sheet.width = 900
+	sheet.height = 600
+	for stage in range(3):
+		var portrait: AtlasTexture = visuals.daughter_portrait(stage, sheet)
+		_check(portrait.region == Rect2(stage * 300, 0, 300, 600), "非 512x1024 立绘按真实尺寸三等分")
+		_check(portrait.atlas == sheet and portrait.filter_clip, "保留原纹理引用与图格裁切")
+	sheet.width = 800
+	sheet.height = 600
+	for index in range(8):
+		var sprite: AtlasTexture = visuals.atlas_cell(sheet, GameState.Content.BUILDING_ATLAS_GRID, index)
+		_check(sprite.region == Rect2((index % 4) * 200, (index / 4) * 300, 200, 300), "建筑图集不依赖 384x512 像素")
+
+	# 提前标记下一检查点，刻意让 begin() 无通知早退，验证 advance_turn 自己负责刷新。
+	GameState.reset_game(42)
+	var notifications: Array[int] = []
+	var listener := func() -> void: notifications.append(GameState.phase)
+	GameState.state_changed.connect(listener)
+	GameState.phase = GameState.Phase.RESULTS
+	GameState.energy = 0
+	GameState.story.checked["2:turn_start"] = true
+	_check(GameState.advance_turn(), "已处理的剧情检查点不阻止回合推进")
+	_check(notifications == [GameState.Phase.FREE] and GameState.turn == 2 and GameState.energy == 10, "剧情早退时仍通知最终回合状态")
+	notifications.clear()
+	GameState.phase = GameState.Phase.RESULTS
+	_check(GameState.advance_turn() and not notifications.is_empty(), "正常新回合也发送刷新通知")
+	notifications.clear()
+	GameState.turn = GameState.total_turns()
+	GameState.phase = GameState.Phase.RESULTS
+	_check(GameState.advance_turn() and notifications == [GameState.Phase.FINISHED], "最终回合发送结束通知")
+	notifications.clear()
+	_check(not GameState.advance_turn() and notifications.is_empty(), "无效推进不发送变更通知")
+	GameState.state_changed.disconnect(listener)
+	GameState.reset_game(42)
+	review_regressions_completed = true
 
 
 ## 临时修改内存配置验证错误和扩展场景，不写入 JSON；用完恢复，避免污染后续测试。
@@ -136,15 +248,20 @@ func _run_content_rules() -> void:
 	GameState.reset_game()
 
 
+## 测试和正式加载都提供完整引用表，避免合法的新奖励被误判为未知 ID。
+func _validate_story(config: Dictionary) -> String:
+	return GameState.Story.validate_config(config, GameState.config.items, GameState.config.activities, GameState.cave_config.buildings)
+
+
 ## 剧情查询只读；完成记录由测试显式传入，不把候选查询冒充正式剧情推进。
 func _run_story_rules(source: Dictionary) -> void:
-	_check(GameState.Story.validate_config(source, GameState.config.items).is_empty(), "剧情示例配置有效")
-	_check(GameState.Story.validate_config({"version": 1, "nodes": []}, GameState.config.items).is_empty(), "允许暂不填写剧情")
+	_check(_validate_story(source).is_empty(), "剧情示例配置有效")
+	_check(_validate_story({"version": 1, "nodes": []}).is_empty(), "允许暂不填写剧情")
 	var bad_root_fields := {"version": 2, "nodes": {}, "note": false, "rewards": {}}
 	for field in bad_root_fields:
 		var changed: Dictionary = source.duplicate(true)
 		changed[field] = bad_root_fields[field]
-		_check(not GameState.Story.validate_config(changed, GameState.config.items).is_empty(), "剧情根字段校验 " + str(field))
+		_check(not _validate_story(changed).is_empty(), "剧情根字段校验 " + str(field))
 	var bad_node_fields := {
 		"id": " ", "name": "", "kind": "unknown", "enabled": 1, "order": true,
 		"checkpoints": ["before_battle"], "requires_completed": "example_herb_conversation",
@@ -153,7 +270,7 @@ func _run_story_rules(source: Dictionary) -> void:
 	for field in bad_node_fields:
 		var changed: Dictionary = source.duplicate(true)
 		changed.nodes[0][field] = bad_node_fields[field]
-		_check(not GameState.Story.validate_config(changed, GameState.config.items).is_empty(), "剧情节点字段校验 " + str(field))
+		_check(not _validate_story(changed).is_empty(), "剧情节点字段校验 " + str(field))
 	for conditions in [
 		{"turn_min": 0}, {"turn_max": 1.5}, {"turn_min": 3, "turn_max": 2},
 		{"total_a_gt": -1}, {"total_a_gt": "1000"}, {"total_a_gt": true},
@@ -163,7 +280,7 @@ func _run_story_rules(source: Dictionary) -> void:
 	]:
 		var changed: Dictionary = source.duplicate(true)
 		changed.nodes[0].conditions = conditions
-		_check(GameState.Story.validate_config(changed, GameState.config.items).contains("conditions"), "剧情条件错误定位到字段")
+		_check(_validate_story(changed).contains("conditions"), "剧情条件错误定位到字段")
 	for variant in [
 		{}, {"lines": []}, {"lines": [{"speaker": 1, "text": "台词"}]},
 		{"lines": [{"speaker": "女儿", "text": " "}]},
@@ -171,7 +288,7 @@ func _run_story_rules(source: Dictionary) -> void:
 	]:
 		var changed: Dictionary = source.duplicate(true)
 		changed.nodes[0].variants["0"] = variant
-		_check(GameState.Story.validate_config(changed, GameState.config.items).contains("variants.0"), "剧情对话错误定位到版本")
+		_check(_validate_story(changed).contains("variants.0"), "剧情对话错误定位到版本")
 	for portrait in [
 		{"texture": "res://assets/missing-story-test.png"},
 		{"texture": "res://scenes/main.tscn"},
@@ -180,27 +297,27 @@ func _run_story_rules(source: Dictionary) -> void:
 	]:
 		var changed: Dictionary = source.duplicate(true)
 		changed.nodes[0].variants["0"].portrait = portrait
-		_check(GameState.Story.validate_config(changed, GameState.config.items).contains("portrait"), "立绘引用和裁剪校验")
+		_check(_validate_story(changed).contains("portrait"), "立绘引用和裁剪校验")
 	var changed: Dictionary = source.duplicate(true)
 	changed.nodes[0].variants.erase("2")
-	_check(GameState.Story.validate_config(changed, GameState.config.items).contains("variants.2"), "主线必须填写三阶段表现")
+	_check(_validate_story(changed).contains("variants.2"), "主线必须填写三阶段表现")
 	changed = source.duplicate(true)
 	changed.nodes[1].variants.erase("default")
-	_check(GameState.Story.validate_config(changed, GameState.config.items).contains("variants.default"), "支线公共表现不能缺失")
+	_check(_validate_story(changed).contains("variants.default"), "支线公共表现不能缺失")
 	changed = source.duplicate(true)
 	changed.nodes.append(changed.nodes[0].duplicate(true))
-	_check(GameState.Story.validate_config(changed, GameState.config.items).contains("ID 重复"), "同一逻辑节点不能重复定义")
+	_check(_validate_story(changed).contains("ID 重复"), "同一逻辑节点不能重复定义")
 	for prerequisites in [["missing"], ["example_breakthrough"], ["example_herb_conversation", "example_herb_conversation"]]:
 		changed = source.duplicate(true)
 		changed.nodes[0].requires_completed = prerequisites
-		_check(GameState.Story.validate_config(changed, GameState.config.items).contains("requires_completed"), "拒绝未知、自身或重复前置")
+		_check(_validate_story(changed).contains("requires_completed"), "拒绝未知、自身或重复前置")
 	changed = source.duplicate(true)
 	changed.nodes[0].requires_completed = ["example_herb_conversation"]
 	changed.nodes[0].excludes_completed = ["example_herb_conversation"]
-	_check(not GameState.Story.validate_config(changed, GameState.config.items).is_empty(), "前置与排除条件不能直接矛盾")
+	_check(not _validate_story(changed).is_empty(), "前置与排除条件不能直接矛盾")
 	changed.nodes[0].excludes_completed = []
 	changed.nodes[1].requires_completed = ["example_breakthrough"]
-	_check(GameState.Story.validate_config(changed, GameState.config.items).contains("循环"), "拒绝前置依赖环")
+	_check(_validate_story(changed).contains("循环"), "拒绝前置依赖环")
 
 	GameState.reset_game(42)
 	GameState.equipment_bonuses.weapon.power = 10000
@@ -228,7 +345,7 @@ func _run_story_rules(source: Dictionary) -> void:
 	_check(GameState.Story.presentation(source, "example_breakthrough", 3).is_empty(), "未知成长阶段不能选错版本")
 	changed = source.duplicate(true)
 	changed.nodes[1].variants["1"] = {"lines": [{"speaker": "女儿", "text": "支线中期覆盖示例"}]}
-	_check(GameState.Story.validate_config(changed, GameState.config.items).is_empty(), "支线可以增加阶段覆盖文本")
+	_check(_validate_story(changed).is_empty(), "支线可以增加阶段覆盖文本")
 	_check(GameState.Story.presentation(changed, "example_herb_conversation", 1).lines[0].text == "支线中期覆盖示例", "阶段覆盖优先于公共版本")
 	_check(GameState.Story.presentation(changed, "example_herb_conversation", 2) == source.nodes[1].variants.default, "未覆盖阶段仍使用公共版本")
 	context.inventory.clearheart_grass = 0
@@ -336,14 +453,14 @@ func _run_story_flow() -> void:
 	ending.costs = {"qingyun_grass": 1}
 	ending.rewards = {"items": {"clearheart_pill": 1}}
 	var config := {"version": 1, "nodes": [first, follow, competition, side, from_side, ending]}
-	_check(GameState.Story.validate_config(config, GameState.config.items, activities).is_empty(), "可执行剧情配置和奖励引用通过校验")
+	_check(_validate_story(config).is_empty(), "可执行剧情配置和奖励引用通过校验")
 	for reward in [{"items": {"missing": 1}}, {"items": {"wood": 0}}, {"activities": ["missing"]}, {"activities": ["music", "music"]}, {"unlock_timing": "later"}, {"land": 2}]:
 		var invalid: Dictionary = config.duplicate(true)
 		invalid.nodes[0].rewards = reward
-		_check(GameState.Story.validate_config(invalid, GameState.config.items, activities).contains("rewards"), "无效奖励不会静默接受")
+		_check(_validate_story(invalid).contains("rewards"), "无效奖励不会静默接受")
 	var invalid: Dictionary = config.duplicate(true)
 	invalid.nodes[0].costs = {"wood": 1.5}
-	_check(GameState.Story.validate_config(invalid, GameState.config.items, activities).contains("costs"), "剧情费用必须是合法物品整数")
+	_check(_validate_story(invalid).contains("costs"), "剧情费用必须是合法物品整数")
 	GameState.story_config = config
 	ScheduleManager.activity_by_id("music").requires_unlock = true
 	ScheduleManager.activity_by_id("craft").requires_unlock = true
@@ -403,6 +520,118 @@ func _run_story_flow() -> void:
 	GameState.config.activities = activities
 	GameState.reset_game(42)
 	story_flow_completed = true
+
+
+## 图纸是可重复使用的资格；只改内存例子，不把正式剧情或初始解锁写死进测试入口。
+func _run_blueprints() -> void:
+	var original_story: Dictionary = GameState.story_config
+	var initial: Array = GameState.cave_config.initial_blueprints.duplicate()
+	var immediate := _story_fixture("blueprint_immediate")
+	immediate.rewards = {"blueprints": ["herb_field"], "unlock_timing": "immediate"}
+	var delayed := _story_fixture("blueprint_delayed", "main", "turn_end")
+	delayed.rewards = {"blueprints": ["herb_field"]}
+	for value in [null, "house", {}, [null], [1], [{}], ["missing"], ["house", "house"]]:
+		GameState.cave_config.initial_blueprints = value
+		_check(GameState.validate_cave_config().contains("initial_blueprints"), "初始图纸拒绝畸形、未知和重复 ID")
+	GameState.cave_config.erase("initial_blueprints")
+	_check(GameState.validate_cave_config().contains("initial_blueprints"), "缺少初始图纸列表明确报错，不偷偷全开放")
+	GameState.cave_config.initial_blueprints = []
+	_check(GameState.validate_cave_config().is_empty(), "允许从无图纸开局")
+	for value in [null, "house", {}, [null], [1], [{}], ["missing"], ["house", "house"]]:
+		var invalid: Dictionary = immediate.duplicate(true)
+		invalid.rewards.blueprints = value
+		var error: Variant = _validate_story({"version": 1, "nodes": [invalid]})
+		_check(error is String and error.contains("rewards.blueprints"), "剧情图纸奖励引用与类型校验")
+	_check(_validate_story({"version": 1, "nodes": [immediate, delayed]}).is_empty(), "合法图纸奖励无需物品定义")
+
+	GameState.cave_config.initial_blueprints = ["house"]
+	GameState.story_config = {"version": 1, "nodes": []}
+	GameState.reset_game(42)
+	var stock: Dictionary = GameState.inventory.duplicate(true)
+	var cave: Dictionary = GameState.cave.duplicate(true)
+	var result: Dictionary = GameState.Cave.build("herb_field", Vector2i(1, 2))
+	_check(not result.ok and str(result.message).contains("图纸"), "材料充足但缺图纸仍不能建造")
+	_check(GameState.inventory == stock and GameState.cave == cave, "缺图纸不扣材料、不生成实例或占用 ID")
+	_check(not GameState.Cave.build("missing", Vector2i(1, 2)).ok, "未知建筑仍被拒绝")
+	_check(GameState.unlocked_blueprints == ["house"] and GameState.story.completed.is_empty(), "初始图纸不代表剧情完成")
+
+	GameState.story_config = {"version": 1, "nodes": [immediate]}
+	GameState.reset_game(42)
+	_check(not GameState.unlocked_blueprints.has("herb_field"), "展示对话未结束时不提前发图纸")
+	var rng_state: int = GameState.rng.state
+	_finish_active_story()
+	_check(GameState.unlocked_blueprints.has("herb_field") and GameState.pending_blueprint_unlocks.is_empty(), "即时图纸完成对话后生效")
+	_check(GameState.inventory == stock and GameState.cave == cave and GameState.rng.state == rng_state, "获得图纸不扣材料、不扩土地、不生成建筑、不消耗随机数")
+	_check(GameState.cave_config.initial_blueprints == ["house"], "奖励不污染初始图纸模板")
+	var first := _build("herb_field", Vector2i(1, 2), "grow_clearheart")
+	_build("herb_field", Vector2i(4, 2), "grow_clearheart")
+	_check(GameState.unlocked_blueprints.count("herb_field") == 1, "同图纸反复造两栋，不按张数扣除")
+	_check(GameState.inventory.wood == stock.wood - 8 and GameState.inventory.stone == stock.stone - 4, "每栋独立扣实际建筑材料")
+	_check(GameState.Cave.preview().produced.clearheart_grass == 8, "有图纸建造并安排后当回合即可生产")
+	_check(GameState.Cave.move_building(first, Vector2i(1, 4)).ok, "已建建筑可以正常移动")
+	var built_world: Dictionary = GameState.cave.duplicate(true)
+	GameState.inventory.wood = 0
+	_check(not GameState.Cave.build("herb_field", Vector2i(4, 4)).ok and GameState.cave == built_world, "有图纸仍要满足建材条件")
+	_check(GameState.unlocked_blueprints.has("herb_field"), "失败建造不会消耗图纸")
+	_check(not GameState.Cave.build("herb_field", Vector2i(7, 5)).ok, "图纸不能越过现有土地边界")
+
+	GameState.story_config = {"version": 1, "nodes": [delayed]}
+	GameState.reset_game(42)
+	_fill()
+	_check(ScheduleManager.confirm_schedule().ok and GameState.phase == GameState.Phase.STORY, "回合末图纸奖励进入剧情")
+	_finish_active_story()
+	_check(GameState.pending_blueprint_unlocks.get("herb_field") == 2 and not GameState.unlocked_blueprints.has("herb_field"), "图纸默认下回合生效，与已掌握状态分开")
+	_check(GameState.Cave.blueprint_error("herb_field").contains("下回合"), "待生效图纸有独立不可建原因")
+	GameState.StoryFlow.apply_pending_unlocks()
+	_check(not GameState.unlocked_blueprints.has("herb_field"), "本回合调用激活入口不会提前解锁")
+	_check(GameState.inventory == stock and GameState.story.results[0].rewards.blueprints == ["herb_field"], "奖励报告记录图纸而不是库存物品")
+	_check(GameState.advance_turn() and GameState.Cave.blueprint_error("herb_field").is_empty(), "下一回合建造资格生效")
+	_check(GameState.pending_blueprint_unlocks.is_empty(), "到期后清除待生效记录")
+
+	# 同一图纸的重复预约不推迟生效；即时奖励可提前激活，已拥有则不重复发放。
+	var pending: Dictionary = immediate.duplicate(true)
+	pending.rewards.unlock_timing = "next_turn"
+	var duplicate: Dictionary = pending.duplicate(true)
+	duplicate.id = "blueprint_duplicate"
+	duplicate.requires_completed = [pending.id]
+	var promote: Dictionary = immediate.duplicate(true)
+	promote.id = "blueprint_promote"
+	promote.requires_completed = [duplicate.id]
+	GameState.story_config = {"version": 1, "nodes": [pending, duplicate, promote]}
+	GameState.reset_game(42)
+	_finish_active_story()
+	_finish_active_story()
+	_check(GameState.pending_blueprint_unlocks == {"herb_field": 2} and GameState.story.results[1].rewards.blueprints.is_empty(), "重复图纸不重复预约或报告新增")
+	_finish_active_story()
+	_check(GameState.pending_blueprint_unlocks.is_empty() and GameState.unlocked_blueprints.count("herb_field") == 1, "即时奖励激活待生效图纸且只有一份资格")
+	GameState.cave_config.initial_blueprints = ["house", "herb_field"]
+	GameState.story_config = {"version": 1, "nodes": [immediate]}
+	GameState.reset_game(42)
+	_finish_active_story()
+	_check(GameState.story.completed.has(immediate.id) and GameState.story.results[0].rewards.blueprints.is_empty(), "已持有图纸仍可推进故事，不重复报告解锁")
+	_check(GameState.inventory == stock, "重复图纸不扣资源、不产生补偿物品")
+	# 不把普通物品事件费用误当成图纸研究费；已有图纸不豁免节点显式配置的 costs。
+	var paid_event: Dictionary = immediate.duplicate(true)
+	paid_event.id = "event_with_existing_blueprint"
+	paid_event.costs = {"wood": 2}
+	GameState.story_config = {"version": 1, "nodes": [paid_event]}
+	GameState.reset_game(42)
+	_check(GameState.StoryFlow.advance(str(paid_event.id), 0).ok, "已有图纸仍需逐句完成事件")
+	GameState.inventory.wood = 1
+	_check(not GameState.StoryFlow.advance(str(paid_event.id), 1).ok and GameState.story.completed.is_empty(), "已有图纸不能绕过普通剧情费用重查")
+	_check(GameState.inventory.wood == 1 and GameState.unlocked_blueprints.count("herb_field") == 1, "费用不足不影响库存或已掌握资格")
+	GameState.inventory.wood = stock.wood
+	_check(GameState.StoryFlow.advance(str(paid_event.id), 1).ok, "补足普通事件材料后可完成")
+	_check(GameState.inventory.wood == stock.wood - 2 and GameState.story.results[0].rewards.blueprints.is_empty(), "普通事件只扣明示费用，不重复发图纸或补偿")
+	GameState.story_config = {"version": 1, "nodes": []}
+	GameState.cave_config.initial_blueprints = ["house"]
+	GameState.pending_blueprint_unlocks["spring"] = 2
+	GameState.reset_game(42)
+	_check(GameState.unlocked_blueprints == ["house"] and GameState.pending_blueprint_unlocks.is_empty(), "新局按配置重建图纸，不携带上局或待生效资格")
+	GameState.cave_config.initial_blueprints = initial
+	GameState.story_config = original_story
+	GameState.reset_game(42)
+	blueprints_completed = true
 
 
 ## 固定种子保证可复现；每组案例重开本局，分别验证阶段、成本、随机与 A/B 边界。
@@ -910,11 +1139,140 @@ func _capture_story_ui(directory: String) -> void:
 	ui.story_view.advance_button.pressed.emit()
 	ui.story_view.advance_button.pressed.emit()
 	_check(GameState.phase == GameState.Phase.RESULTS, "长台词也能正常完成")
+	_check(_check_replacement_assets(ui), "替换素材的界面回归必须完整执行")
 	ui.queue_free()
 	await get_tree().process_frame
 	GameState.story_config = source
 	GameState.reset_game(42)
 	story_ui_completed = true
+
+
+## 一个完整图纸闭环使用现有丹炉作测试数据，不新增正式建筑或剧情内容。
+func _capture_blueprint_ui(directory: String) -> void:
+	var source: Dictionary = GameState.story_config
+	var initial: Array = GameState.cave_config.initial_blueprints.duplicate()
+	var node := _story_fixture("blueprint_ui", "main", "turn_end")
+	node.name = "丹炉图纸（测试）"
+	node.rewards = {"blueprints": ["alchemy"]}
+	node.variants["0"].lines = [
+		{"speaker": "师父", "text": "这份丹炉图纸先收好。"},
+		{"speaker": "师父", "text": "待图纸整理妥当，便可备料建造。"},
+	]
+	GameState.story_config = {"version": 1, "nodes": [node]}
+	GameState.cave_config.initial_blueprints.erase("alchemy")
+	GameState.reset_game(42)
+	get_window().size = Vector2i(960, 540)
+	var ui: Control = load("res://scenes/main.tscn").instantiate()
+	add_child(ui)
+	ui.show_cave()
+	var cave_ui: Control = ui.cave_view
+	var index := -1
+	for i in range(cave_ui.catalog.item_count):
+		if cave_ui.catalog.get_item_metadata(i) == "alchemy":
+			index = i
+	_check(index >= 0, "未获得图纸的建筑仍在目录中，可查看锁定原因")
+	cave_ui.catalog.select(index)
+	cave_ui.catalog.item_selected.emit(index)
+	_check(cave_ui.mode_buttons.build.disabled and cave_ui.current_mode == "select", "缺图纸时不能进入建造模式")
+	_check(cave_ui.cost_label.text.contains("尚未获得图纸"), "选中锁定项显示具体原因")
+	var stock: Dictionary = GameState.inventory.duplicate(true)
+	# 绕过按钮状态模拟旧输入，规则层也必须拒绝，不能只靠界面置灰。
+	cave_ui.current_mode = "build"
+	cave_ui._cell_clicked(Vector2i(1, 2))
+	_check(GameState.cave.buildings.is_empty() and GameState.inventory == stock, "旧建造请求不绕过图纸校验")
+	await _snapshot(directory.path_join("16-blueprint-locked.png"))
+	_check(cave_ui.cost_label.get_global_rect().end.y <= cave_ui.toolbar_panel.get_global_rect().end.y, "小窗口锁定提示不超出工具栏")
+	ui.show_home()
+	_fill()
+	ui.open_menu("work")
+	ui.confirm_button.pressed.emit()
+	ui.story_view.advance_button.pressed.emit()
+	_check(ui.story_view.effect_label.text.contains("丹炉图纸") and ui.story_view.effect_label.text.contains("下回合可用"), "末句预告图纸与生效时点")
+	get_window().size = Vector2i(1280, 720)
+	await _snapshot(directory.path_join("17-blueprint-dialogue.png"))
+	ui.story_view.advance_button.pressed.emit()
+	_check(ui.results.text.contains("丹炉图纸") and GameState.inventory == stock, "札记展示图纸奖励，不冒充物品入库或扣材料")
+	ui.show_cave()
+	_check(cave_ui.cost_label.text.contains("下回合可用") and cave_ui.mode_buttons.build.disabled, "已获得但待生效仍不能建造")
+	await _snapshot(directory.path_join("18-blueprint-pending.png"))
+	ui.show_home()
+	ui.open_menu("work")
+	ui.next_button.pressed.emit()
+	ui.show_cave()
+	_check(not cave_ui.mode_buttons.build.disabled and not cave_ui.cost_label.text.contains("图纸"), "下一回合自动刷新目录与建造资格")
+	cave_ui.mode_buttons.build.pressed.emit()
+	for position in [Vector2i(1, 2), Vector2i(4, 2)]:
+		var click := InputEventMouseButton.new()
+		click.button_index = MOUSE_BUTTON_LEFT
+		click.pressed = true
+		click.position = cave_ui.board.cell_center(position)
+		cave_ui.board._gui_input(click)
+	_check(GameState.cave.buildings.size() == 2 and GameState.unlocked_blueprints.has("alchemy"), "窗口中同一图纸连续建造两栋")
+	_check(GameState.inventory.wood == stock.wood - 12 and GameState.inventory.stone == stock.stone - 12, "窗口建造仅扣两份建材")
+	await _snapshot(directory.path_join("19-blueprint-built.png"))
+	ui.queue_free()
+	await get_tree().process_frame
+	GameState.story_config = source
+	GameState.cave_config.initial_blueprints = initial
+	GameState.reset_game(42)
+	blueprint_ui_completed = true
+
+
+## 只临时替换内存中的资源缓存，不改作者的 PNG；验证真实 UI 调用链也使用动态裁切。
+func _check_replacement_assets(ui: Control) -> bool:
+	var portrait_path := "res://assets/daughter_stages.png"
+	var original_portrait: Texture2D = load(portrait_path)
+	var replacement := GradientTexture2D.new()
+	replacement.width = 900
+	replacement.height = 600
+	replacement.take_over_path(portrait_path)
+	for stage in range(3):
+		GameState.reset_game(42)
+		GameState.turn = [1, 13, 37][stage]
+		GameState.story.active.growth_phase = stage
+		GameState.story.active.presentation.erase("portrait")
+		ui.portrait_stage = -1
+		ui.story_view.shown_stage = -1
+		GameState.state_changed.emit()
+		var expected := Rect2(stage * 300, 0, 300, 600)
+		_check(ui.portrait.texture.region == expected, "更换尺寸后家园立绘正确")
+		_check(ui.story_view.portrait.texture.region == expected, "无 portrait 的支线回退与家园一致")
+	GameState.story.active.presentation.portrait = {"texture": portrait_path, "region": [10, 20, 100, 200]}
+	ui.story_view.shown_stage = -1
+	ui.story_view._refresh()
+	_check(ui.story_view.portrait.texture.region == Rect2(10, 20, 100, 200), "显式剧情裁切不被默认布局覆盖")
+	GameState.story.active.presentation.portrait.erase("region")
+	ui.story_view.shown_stage = -1
+	ui.story_view._refresh()
+	_check(ui.story_view.portrait.texture == replacement, "专用立绘不填 region 时显示整图")
+	original_portrait.take_over_path(portrait_path)
+
+	var building_path := "res://assets/cave_buildings.png"
+	var original_buildings: Texture2D = load(building_path)
+	var pixels := Image.create_empty(800, 600, false, Image.FORMAT_RGBA8)
+	# 第 6 格只有右半部分不透明，用来区分显式序号及透明命中，其他格全透明。
+	pixels.fill_rect(Rect2i(500, 300, 100, 300), Color.WHITE)
+	var building_texture := ImageTexture.create_from_image(pixels)
+	building_texture.take_over_path(building_path)
+	var cave: Dictionary = GameState.cave
+	var house: Dictionary = GameState.cave_config.buildings.house
+	var old_index: int = int(house.sprite_index)
+	house.sprite_index = 6
+	GameState.cave = cave.duplicate(true)
+	GameState.cave.buildings = [{"id": 99, "type": "house", "position": Vector2i(1, 4), "recipe": ""}]
+	var board: Control = load("res://scripts/cave_board.gd").new()
+	board.size = Vector2(800, 600)
+	add_child(board)
+	_check(board.sprites[6].region == Rect2(400, 300, 200, 300), "真实洞天地块使用替换图集尺寸")
+	var rect: Rect2 = board.structure_rect(Vector2(1, 4), Vector2.ONE)
+	_check(is_equal_approx(rect.size.y / rect.size.x, 1.5), "建筑显示保持替换图格比例")
+	_check(board.building_at_point(rect.position + rect.size * Vector2(0.75, 0.5)).get("id", -1) == 99, "点击命中使用配置图格的真实像素")
+	_check(board.building_at_point(rect.position + rect.size * Vector2(0.25, 0.5)).is_empty(), "配置图格的透明部分不命中")
+	board.free()
+	house.sprite_index = old_index
+	GameState.cave = cave
+	original_buildings.take_over_path(building_path)
+	return true
 
 
 ## 等容器完成布局且本帧渲染结束再读像素；此流程需要有图形输出，不能加 --headless。

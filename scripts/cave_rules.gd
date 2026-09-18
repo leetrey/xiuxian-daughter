@@ -102,11 +102,23 @@ static func placement_error(type: String, position: Vector2i, moving_id: int = -
 	return ""
 
 
+## 图纸只控制能否新建；获得一次可重复建造，不进入建材成本或生产投入。
+static func blueprint_error(type: String) -> String:
+	if not GameState.cave_config.buildings.has(type):
+		return "未知建筑"
+	if GameState.unlocked_blueprints.has(type):
+		return ""
+	return "图纸下回合可用" if GameState.pending_blueprint_unlocks.has(type) else "尚未获得图纸"
+
+
 ## 校验成功才扣建材和创建实例；稳定 id 不随移动变化，也用于生产分料排序。
 static func build(type: String, position: Vector2i) -> Dictionary:
 	if GameState.phase != GameState.Phase.FREE:
 		return _result(false, "本回合管理已结束")
-	var error := placement_error(type, position)
+	var error := blueprint_error(type)
+	if not error.is_empty():
+		return _result(false, error)
+	error = placement_error(type, position)
 	if not error.is_empty():
 		return _result(false, error)
 	var costs: Dictionary = GameState.cave_config.buildings[type].costs

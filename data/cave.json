@@ -6,14 +6,15 @@
   "initial_roads": [[1, 3], [2, 3], [3, 3], [4, 3], [5, 3]],
   "distance_metric": "manhattan",
   "output_rounding": "floor",
+  "initial_blueprints": ["house", "herb_field", "grove", "quarry", "alchemy", "scarecrow", "spring"],
   "buildings": {
-    "house": {"name": "竹舍", "short": "舍", "category": "housing", "size": [1, 1], "color": "#91acbc", "costs": {"wood": 6, "stone": 2}, "capacity": 2, "worker_slots": 0, "recipes": []},
-    "herb_field": {"name": "灵田", "short": "田", "category": "production", "size": [2, 1], "color": "#89b985", "costs": {"wood": 4, "stone": 2}, "worker_slots": 1, "work_type": "farming", "output_categories": ["herb"], "recipes": ["grow_clearheart", "grow_qingyun"]},
-    "grove": {"name": "林场", "short": "林", "category": "production", "size": [1, 2], "color": "#6dacaa", "costs": {"wood": 4, "stone": 2}, "worker_slots": 1, "work_type": "forestry", "output_categories": ["resource"], "recipes": ["gather_wood"]},
-    "quarry": {"name": "采石场", "short": "石", "category": "production", "size": [2, 1], "color": "#b6adc9", "costs": {"wood": 4, "stone": 4}, "worker_slots": 1, "work_type": "mining", "output_categories": ["resource"], "recipes": ["gather_stone"]},
-    "alchemy": {"name": "丹炉", "short": "丹", "category": "manufacturing", "size": [1, 1], "color": "#d0919d", "costs": {"wood": 6, "stone": 6}, "worker_slots": 1, "work_type": "alchemy", "output_categories": ["product"], "recipes": ["make_clearheart"]},
-    "scarecrow": {"name": "稻草人", "short": "稻", "category": "landscape", "size": [1, 1], "color": "#d4bb78", "costs": {"wood": 3}, "worker_slots": 0, "recipes": [], "bonus": {"affix": "harvest", "label": "丰收", "work_types": ["farming"], "radius": 3, "peak": 0.5}},
-    "spring": {"name": "灵泉", "short": "泉", "category": "landscape", "size": [1, 1], "color": "#80bed5", "costs": {"stone": 5}, "worker_slots": 0, "recipes": [], "bonus": {"affix": "spirit", "label": "灵气", "work_types": ["farming", "alchemy"], "radius": 2, "peak": 0.25}}
+    "house": {"name": "竹舍", "short": "舍", "sprite_index": 0, "category": "housing", "size": [1, 1], "color": "#91acbc", "costs": {"wood": 6, "stone": 2}, "capacity": 2, "worker_slots": 0, "recipes": []},
+    "herb_field": {"name": "灵田", "short": "田", "sprite_index": 1, "category": "production", "size": [2, 1], "color": "#89b985", "costs": {"wood": 4, "stone": 2}, "worker_slots": 1, "work_type": "farming", "output_categories": ["herb"], "recipes": ["grow_clearheart", "grow_qingyun"]},
+    "grove": {"name": "林场", "short": "林", "sprite_index": 2, "category": "production", "size": [1, 2], "color": "#6dacaa", "costs": {"wood": 4, "stone": 2}, "worker_slots": 1, "work_type": "forestry", "output_categories": ["resource"], "recipes": ["gather_wood"]},
+    "quarry": {"name": "采石场", "short": "石", "sprite_index": 3, "category": "production", "size": [2, 1], "color": "#b6adc9", "costs": {"wood": 4, "stone": 4}, "worker_slots": 1, "work_type": "mining", "output_categories": ["resource"], "recipes": ["gather_stone"]},
+    "alchemy": {"name": "丹炉", "short": "丹", "sprite_index": 4, "category": "manufacturing", "size": [1, 1], "color": "#d0919d", "costs": {"wood": 6, "stone": 6}, "worker_slots": 1, "work_type": "alchemy", "output_categories": ["product"], "recipes": ["make_clearheart"]},
+    "scarecrow": {"name": "稻草人", "short": "稻", "sprite_index": 5, "category": "landscape", "size": [1, 1], "color": "#d4bb78", "costs": {"wood": 3}, "worker_slots": 0, "recipes": [], "bonus": {"affix": "harvest", "label": "丰收", "work_types": ["farming"], "radius": 3, "peak": 0.5}},
+    "spring": {"name": "灵泉", "short": "泉", "sprite_index": 6, "category": "landscape", "size": [1, 1], "color": "#80bed5", "costs": {"stone": 5}, "worker_slots": 0, "recipes": [], "bonus": {"affix": "spirit", "label": "灵气", "work_types": ["farming", "alchemy"], "radius": 2, "peak": 0.25}}
   },
   "workers": [
     {"id": "qinghe", "name": "青禾", "aptitudes": {"farming": 50, "forestry": 25, "mining": 0, "alchemy": 10}},

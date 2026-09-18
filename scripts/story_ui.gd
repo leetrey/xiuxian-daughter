@@ -118,17 +118,20 @@ func _refresh() -> void:
 	var changed := shown_id != id or shown_line != line
 	if shown_id != id or shown_stage != stage:
 		var definition: Dictionary = active.presentation.get("portrait", {})
+		var texture: Texture2D
 		if definition.is_empty():
 			# 无专用立绘时沿用家园的当前阶段女儿，不因台词说话人去猜其他人物素材。
-			definition = {"texture": "res://assets/daughter_stages.png", "region": [stage * 512, 0, 512, 1024]}
-		var texture: Texture2D = load(str(definition.texture))
-		if definition.has("region"):
-			var atlas := AtlasTexture.new()
-			atlas.atlas = texture
-			var region: Array = definition.region
-			atlas.region = Rect2(float(region[0]), float(region[1]), float(region[2]), float(region[3]))
-			atlas.filter_clip = true
-			texture = atlas
+			texture = ThemeKit.daughter_portrait(stage)
+		else:
+			texture = load(str(definition.texture))
+			# 专用剧情图的显式 region 仍按作者填写的像素裁切，不套用三阶段布局。
+			if definition.has("region"):
+				var atlas := AtlasTexture.new()
+				atlas.atlas = texture
+				var region: Array = definition.region
+				atlas.region = Rect2(float(region[0]), float(region[1]), float(region[2]), float(region[3]))
+				atlas.filter_clip = true
+				texture = atlas
 		portrait.texture = texture
 	shown_id = id
 	shown_line = line
@@ -177,4 +180,9 @@ func _effects(node: Dictionary) -> String:
 	for id in rewards.get("activities", []):
 		var activity := ScheduleManager.activity_by_id(str(id))
 		parts.append("%s%s" % [activity.name, " · 下回合开放" if rewards.get("unlock_timing", "next_turn") == "next_turn" else " · 对话后开放"])
+	for id in rewards.get("blueprints", []):
+		var status := "下回合可用" if rewards.get("unlock_timing", "next_turn") == "next_turn" else "对话后可用"
+		if GameState.unlocked_blueprints.has(id):
+			status = "已掌握"
+		parts.append("%s图纸 · %s" % [GameState.cave_config.buildings[id].name, status])
 	return "    ".join(parts)

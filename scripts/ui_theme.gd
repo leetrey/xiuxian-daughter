@@ -17,6 +17,23 @@ const GROUP_COLORS := {"physique": Color("#ae6955"), "dao": Color("#507f9a"), "a
 static var _icons: Dictionary = {}
 
 
+## 等分图集按纹理实际尺寸取格；缩放替换素材时不依赖样例的像素尺寸。
+static func atlas_cell(sheet: Texture2D, grid: Vector2i, index: int) -> AtlasTexture:
+	var cell := sheet.get_size() / Vector2(grid)
+	var atlas := AtlasTexture.new()
+	atlas.atlas = sheet
+	atlas.region = Rect2(Vector2(index % grid.x, index / grid.x) * cell, cell)
+	atlas.filter_clip = true
+	return atlas
+
+
+## 家园与无专用立绘的剧情共用三阶段裁切规则；可传入替换纹理用于回归测试。
+static func daughter_portrait(stage: int, sheet: Texture2D = null) -> AtlasTexture:
+	if sheet == null:
+		sheet = load("res://assets/daughter_stages.png")
+	return atlas_cell(sheet, Vector2i(3, 1), stage)
+
+
 ## 每次创建独立样式，后续改一个面板的边距/边框不会连带修改其他控件。
 static func panel(color: Color, border: Color = Color.TRANSPARENT, padding: int = 12, radius: int = 6) -> StyleBoxFlat:
 	var style := StyleBoxFlat.new()

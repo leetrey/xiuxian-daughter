@@ -46,16 +46,13 @@ static func advance(expected_id: String, expected_line: int) -> Dictionary:
 	for id in rewards.get("items", {}):
 		GameState.inventory[id] = int(GameState.inventory.get(id, 0)) + int(rewards.items[id])
 	var timing := str(rewards.get("unlock_timing", "next_turn"))
-	for id in rewards.get("activities", []):
-		if GameState.unlocked_activities.has(id):
-			continue
-		if timing == "immediate":
-			GameState.unlocked_activities.append(str(id))
-			GameState.pending_activity_unlocks.erase(id)
-		elif not GameState.pending_activity_unlocks.has(id):
-			GameState.pending_activity_unlocks[id] = GameState.turn + 1
+	_grant_unlocks(rewards.get("activities", []), GameState.unlocked_activities, GameState.pending_activity_unlocks, timing)
+	var applied_rewards: Dictionary = rewards.duplicate(true)
+	if rewards.has("blueprints"):
+		# 重复图纸不转成库存、材料或补偿，也不在本次报告中冒充新获得。
+		applied_rewards.blueprints = _grant_unlocks(rewards.blueprints, GameState.unlocked_blueprints, GameState.pending_blueprint_unlocks, timing)
 	GameState.story.completed[node.id] = {"turn": GameState.turn, "growth_phase": int(active.growth_phase)}
-	GameState.story.results.append({"id": node.id, "name": node.name, "costs": costs.duplicate(true), "rewards": rewards.duplicate(true)})
+	GameState.story.results.append({"id": node.id, "name": node.name, "costs": costs.duplicate(true), "rewards": applied_rewards})
 	GameState.story.active = {}
 	# 扣费与奖励会改变下一条的资格，因此不缓存整批候选列表。
 	_select_next()
@@ -63,13 +60,34 @@ static func advance(expected_id: String, expected_line: int) -> Dictionary:
 	return {"ok": true, "message": ""}
 
 
-## 在回合开始检查剧情之前激活到期日程；不替代土地、图纸或继承系统。
+## 在回合开始检查剧情之前激活到期日程和图纸；不替代土地扩张或开局继承。
 static func apply_pending_unlocks() -> void:
-	for id in GameState.pending_activity_unlocks.keys():
-		if int(GameState.pending_activity_unlocks[id]) <= GameState.turn:
-			if not GameState.unlocked_activities.has(id):
-				GameState.unlocked_activities.append(str(id))
-			GameState.pending_activity_unlocks.erase(id)
+	_apply_pending(GameState.unlocked_activities, GameState.pending_activity_unlocks)
+	_apply_pending(GameState.unlocked_blueprints, GameState.pending_blueprint_unlocks)
+
+
+## 日程和图纸复用生效时点，不合并两类状态；返回本次新生效或新预约的 ID。
+static func _grant_unlocks(ids: Array, unlocked: Array[String], pending: Dictionary, timing: String) -> Array[String]:
+	var granted: Array[String] = []
+	for id in ids:
+		if unlocked.has(id):
+			continue
+		if timing == "immediate":
+			unlocked.append(str(id))
+			pending.erase(id)
+			granted.append(str(id))
+		elif not pending.has(id):
+			pending[id] = GameState.turn + 1
+			granted.append(str(id))
+	return granted
+
+
+static func _apply_pending(unlocked: Array[String], pending: Dictionary) -> void:
+	for id in pending.keys():
+		if int(pending[id]) <= GameState.turn:
+			if not unlocked.has(id):
+				unlocked.append(str(id))
+			pending.erase(id)
 
 
 static func _select_next() -> void:

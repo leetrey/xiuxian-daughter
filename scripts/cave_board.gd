@@ -12,19 +12,18 @@ var hover_cell := Vector2i(-1, -1)
 var sprites: Array[AtlasTexture] = []
 # 缓存原图像素用于透明区域命中；不能每次鼠标移动都重新读取纹理。
 var sprite_pixels: Image
+var sprite_aspect := 4.0 / 3.0
 
 
 func _ready() -> void:
 	clip_contents = true
 	var sheet: Texture2D = load("res://assets/cave_buildings.png")
 	sprite_pixels = sheet.get_image()
-	# 图集为 4 列 2 行，单格 384x512；素材布局改变时须同步这些取图区域。
-	for index in range(8):
-		var sprite := AtlasTexture.new()
-		sprite.atlas = sheet
-		sprite.region = Rect2((index % 4) * 384, (index / 4) * 512, 384, 512)
-		sprite.filter_clip = true
-		sprites.append(sprite)
+	# 保持配置约定的网格，像素尺寸与显示比例从实际素材推导。
+	var grid: Vector2i = GameState.Content.BUILDING_ATLAS_GRID
+	for index in range(grid.x * grid.y):
+		sprites.append(ThemeKit.atlas_cell(sheet, grid, index))
+	sprite_aspect = sprites[0].region.size.y / sprites[0].region.size.x
 	resized.connect(queue_redraw)
 	mouse_exited.connect(func() -> void:
 		hover_cell = Vector2i(-1, -1)
@@ -141,6 +140,8 @@ func _draw() -> void:
 		var data: Dictionary = GameState.cave_config.buildings[ghost_type]
 		# 绿色仅表示占地合法，不保证材料或容量足够；实际操作仍由规则层完整校验。
 		var valid: bool = GameState.Cave.placement_error(ghost_type, hover_cell, selected_id if mode == "move" else -1).is_empty()
+		if mode == "build":
+			valid = valid and GameState.Cave.blueprint_error(ghost_type).is_empty()
 		var footprint := Vector2(data.size[0], data.size[1])
 		var tile := _footprint(Vector2(hover_cell), footprint)
 		draw_colored_polygon(tile, Color("#c5f1ce75") if valid else Color("#e49d9a75"))
@@ -154,7 +155,9 @@ func _draw_structure(point: Vector2, footprint: Vector2, data: Dictionary) -> vo
 
 
 func _sprite_index(data: Dictionary) -> int:
-	# 未提供独立美术的新增内容暂用同类图；配置与生产不依赖素材名称。
+	if data.has("sprite_index"):
+		return int(data.sprite_index)
+	# 兼容未填写序号的旧内容；新增建筑可显式指定图格，不必修改此映射。
 	var index := 5
 	var work := str(data.get("work_type", ""))
 	if data.category == "housing":
@@ -173,7 +176,7 @@ func structure_rect(point: Vector2, footprint: Vector2) -> Rect2:
 	var center := project(point + footprint / 2.0)
 	var width := cell_size() * (footprint.x + footprint.y) * 0.49
 	var bottom := project(point + footprint).y + width * 0.10
-	var height := width * 4.0 / 3.0
+	var height := width * sprite_aspect
 	return Rect2(center.x - width / 2.0, bottom - height, width, height)
 
 
@@ -204,7 +207,7 @@ func building_at_point(point: Vector2) -> Dictionary:
 
 
 func _draw_sprite(index: int, center_x: float, bottom: float, width: float) -> void:
-	var height := width * 4.0 / 3.0
+	var height := width * sprite_aspect
 	draw_texture_rect(sprites[index], Rect2(center_x - width / 2.0, bottom - height, width, height), false)
 
 

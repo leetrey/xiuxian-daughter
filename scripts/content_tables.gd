@@ -3,6 +3,35 @@ extends RefCounted
 # 作者修改的是 JSON 表；这里仅负责读取、类型与跨表引用检查，不执行玩法。
 # 读取函数返回 {data, error}；校验函数返回错误文字，空字符串表示通过。
 const ITEM_CATEGORIES := ["resource", "herb", "product"]
+# 建筑样例图集的布局契约；校验和绘制共用，避免允许的序号超出真实格数。
+const BUILDING_ATLAS_GRID := Vector2i(4, 2)
+
+
+## JSON 数字可能解析为 float；先验类型，再转换，拒绝字符串、布尔值和非有限值。
+static func is_number(value: Variant) -> bool:
+	return (value is int or value is float) and is_finite(float(value))
+
+
+static func is_integer(value: Variant) -> bool:
+	return is_number(value) and float(value) == floor(float(value))
+
+
+## 图纸直接引用建筑 ID，是资格列表而非库存数量；开局配置和剧情奖励共用校验。
+static func validate_blueprints(ids: Variant, buildings: Dictionary, path: String) -> String:
+	if not ids is Array:
+		return path + ": 需要建筑 ID 数组"
+	var seen: Array[String] = []
+	for index in range(ids.size()):
+		var id: Variant = ids[index]
+		var field := path + "[%d]" % index
+		if not id is String or str(id).strip_edges().is_empty():
+			return field + ": 需要非空建筑 ID"
+		if not buildings.has(id):
+			return field + ": 未知建筑 " + str(id)
+		if seen.has(id):
+			return field + ": 图纸 ID 重复 " + str(id)
+		seen.append(id)
+	return ""
 
 
 static func read_object(path: String) -> Dictionary:

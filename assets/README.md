@@ -5,13 +5,13 @@
 | 文件 | 用途 | 当前格式与读取位置 |
 |---|---|---|
 | home_courtyard.png | 山居主场景 | 1672×941，不透明；main.gd 按比例铺满 |
-| daughter_stages.png | 三个成长阶段立绘 | 1536×1024，透明 PNG；从左到右三列，各 512×1024；main.gd 根据 growth_phase() 取列 |
+| daughter_stages.png | 三个成长阶段立绘 | 当前 1536×1024，透明 PNG；从左到右三等宽列；家园与剧情回退共用 ui_theme.gd 的 daughter_portrait() |
 | cave_valley.png | 洞天环境背景 | 1672×941，不透明；cave_ui.gd 按比例铺满 |
-| cave_buildings.png | 七种建筑与入口 | 1536×1024，透明 PNG；4 列×2 行，各 384×512；cave_board.gd 读取 AtlasTexture |
+| cave_buildings.png | 七种建筑与入口 | 当前 1536×1024，透明 PNG；4 列×2 行；cave_board.gd 按实际纹理尺寸等分并保持单格比例 |
 
-建筑图集顺序：第一行竹舍、灵田、林场、采石场；第二行丹炉、稻草人、灵泉、入口。新增配置暂按 category / work_type / 景观词条使用同类图，不要求先画新素材才能验证生产。需要新增独立造型时再扩图集和 `_sprite_index()` 映射。
+建筑图集按行从 0 编号：0 竹舍、1 灵田、2 林场、3 采石场、4 丹炉、5 稻草人、6 灵泉、7 入口。`cave.json` 的建筑可选填 `sprite_index`（整数 0–7），优先使用指定格；省略才按 category / work_type / 景观词条沿用同类映射，未知类型回退到 5。新增建筑无需修改 `_sprite_index()`；绘制与透明像素命中使用同一序号。
 
-替换人物图时保持三等分列、人物底部对齐、真实 alpha 透明；替换建筑图时保持格尺寸、顺序与透明边距。改变布局格式时需要同步 AtlasTexture 的区域定义。运行中不读取原始生成目录，所有运行依赖都在工程内；Godot 自动生成 `.import` 文件。
+替换人物图时保持三等分列、人物底部对齐、真实 alpha 透明；替换建筑图时保持 4×2 等分网格与透明边距，入口仍使用第 7 格。整图分辨率可改变，不必保持 512×1024 或 384×512 单格尺寸。剧情中显式填写的 `portrait.region` 是绝对像素，换图后仍须同步修改；只有未填专用立绘的回退会自动三等分。改变网格布局而非分辨率仍需程序改动，建筑布局契约位于 `content_tables.gd` 的 `BUILDING_ATLAS_GRID`。运行中不读取原始生成目录，所有运行依赖都在工程内；Godot 自动生成 `.import` 文件。
 
 `cultivation_home.png` 为已有素材，未覆盖。`icons/` 使用 Lucide，来源和许可证保留于该目录。中文界面使用系统字体，未将 macOS 字体文件打包进仓库。
 

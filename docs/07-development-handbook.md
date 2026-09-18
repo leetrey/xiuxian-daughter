@@ -2,7 +2,7 @@
 
 适用范围：当前 Godot 原型。更新日期：2026-09-18，本机验证版本为 Godot 4.7.1，代码语言为 GDScript。
 
-这份手册讲如何修改和排查现有工程，不代替玩法设计。规则看 [01 主体设计基线](01-game-design.md)，真实实现范围看 [05 开发进度](05-development-progress.md)，内容填表看 [06 内容填写指南](06-content-authoring.md)。剧情已接入线性播放、完成、物品结算和活动解锁；父亲恢复、存档、冒险、战斗、继承仍未实现，不能靠新增几个 JSON 字段直接启用。
+这份手册讲如何修改和排查现有工程，不代替玩法设计。规则看 [01 主体设计基线](01-game-design.md)，真实实现范围看 [05 开发进度](05-development-progress.md)，内容填表看 [06 内容填写指南](06-content-authoring.md)。剧情已接入线性播放、完成、物品结算、活动与图纸解锁；父亲恢复、土地扩张、存档、冒险、战斗、继承仍未实现，不能靠新增几个 JSON 字段直接启用。
 
 ## 目录
 
@@ -137,13 +137,13 @@ docs/                       当前设计、进度、填表和开发说明
 | 培养规则 | [schedule_manager.gd](../scripts/schedule_manager.gd) | 校验日程，扣费，压力概率，成长，自由活动 |
 | 洞天规则 | [cave_rules.gd](../scripts/cave_rules.gd) | 占地、道路、派工、景观乘区、预测与生产入库 |
 | 剧情查询 | [story_rules.gd](../scripts/story_rules.gd) | 节点校验、条件不满足原因、候选顺序、三阶段表现；只读 |
-| 剧情执行 | [story_flow.gd](../scripts/story_flow.gd) | 检查点与当前对话、末句完成、物品结算和待生效活动解锁 |
+| 剧情执行 | [story_flow.gd](../scripts/story_flow.gd) | 检查点与当前对话、末句完成、物品结算和活动/图纸生效时点 |
 | 剧情界面 | [story_ui.gd](../scripts/story_ui.gd) | 背景、立绘、台词、费用奖励预告、推进按钮 |
 | 配置校验 | [content_tables.gd](../scripts/content_tables.gd) | 解析 JSON，检查物品数量、分类与跨表引用 |
 | 主界面 | [main.gd](../scripts/main.gd) | 家园、立绘、菜单、按钮、闲置弹窗和成长札记 |
 | 洞天界面 | [cave_ui.gd](../scripts/cave_ui.gd) | 工具模式、建筑目录、配方、御灵和产出详情 |
 | 地块表现 | [cave_board.gd](../scripts/cave_board.gd) | 等距投影、建筑绘制、透明像素命中与放置预览 |
-| 公共外观 | [ui_theme.gd](../scripts/ui_theme.gd) | 字体、颜色、图标和按钮状态 |
+| 公共外观 | [ui_theme.gd](../scripts/ui_theme.gd) | 字体、颜色、图标、按钮状态和等分图集裁切 |
 | 验证 | [validate_content.gd](../scripts/validate_content.gd)、[smoke_test.gd](../scripts/smoke_test.gd) | 作者填表检查、规则回归、实际窗口走查 |
 
 只有 `GameState` 和 `ScheduleManager` 是 Autoload，项目启动时自动创建。`Cave`、`Content`、`Story`、`StoryFlow` 是 `GameState` 预加载的普通脚本，通过静态方法调用；剧情真实状态也只存在 GameState 中。
@@ -210,7 +210,7 @@ main._confirm()
      -> 读完剧情后切到 RESULTS，展示完整札记
   -> 玩家在札记点击下一回合
   -> GameState.advance_turn()
-     -> 清日程、回精力、激活到期活动解锁、检查开始剧情
+     -> 清日程、回精力、激活到期活动与图纸、检查开始剧情
      -> 保留压力、洞天与剧情完成记录；最后一回合则 FINISHED
 ```
 
@@ -314,12 +314,14 @@ godot --path . --headless res://scenes/validate_content.tscn -- --story-preview
 StoryFlow.begin(checkpoint) -> 主线候选 -> 当前节点/版本/第 0 行
 story_ui 的箭头按钮 -> StoryFlow.advance(屏幕节点 ID, 屏幕行号)
   -> 非末句：只加行号
-  -> 末句：重新检查 -> 扣 costs -> 发 rewards.items -> 记录活动解锁 -> 记录 completed
+  -> 末句：重新检查 -> 扣 costs -> 发 rewards.items -> 记录活动与图纸 -> 记录 completed
   -> 重新查询同类候选；主线耗尽后处理支线
   -> 全部读完返回 FREE 或 RESULTS
 ```
 
 `GameState.story` 保存 active、completed、checked 和当前回合 results；`unlocked_activities` 与 `pending_activity_unlocks` 单独保存即时/延后活动解锁。检查点一回合只进入一次，同一逻辑节点本局只完成一次。`StoryFlow.advance()` 会拒绝旧 ID/行号提交，不能直接用 `completed[id] = true` 冒充结算。
+
+图纸使用 `unlocked_blueprints`（已可用的建筑 ID）与 `pending_blueprint_unlocks`（ID 到生效回合），新局从 `cave.json.initial_blueprints` 重建。`StoryFlow._grant_unlocks()` 复用活动的时点处理，图纸奖励不扣费；`Cave.blueprint_error()` 是建造入口与 UI 共用的资格判断，`build()` 通过后仍检查占地和建材。不要把图纸加进库存或在成功建造后 erase 图纸，移动已有建筑也不重新收费。普通节点 costs 仍按原规则执行，不由重复图纸自动豁免。
 
 在测试里切换阶段不会自动检查剧情；真实入口是新局或 `advance_turn()`，回合末入口是培养确认后。测试剧情读完前不得期待 FREE，必须逐句推进；旧培养单元测试临时用空剧情表隔离，另有真实流程集成测试，不在正式游戏加“跳过剧情”开关。
 
@@ -364,7 +366,9 @@ _refresh()             属性、库存相关按钮、阶段和结果回显
 
 ### 换图与改建筑表现
 
-背景、人物和建筑的尺寸、图集顺序、生成记录集中在 [assets/README.md](../assets/README.md)。保持图集布局可直接沿用现有加载代码；改变列数或单格尺寸时同步 AtlasTexture 区域。
+背景、人物和建筑的尺寸、图集顺序、生成记录集中在 [assets/README.md](../assets/README.md)。人物三列、建筑 4×2 网格不变时可直接替换分辨率，`ui_theme.gd` 的 `atlas_cell()` 按真实纹理尺寸取格；家园和剧情回退共用 `daughter_portrait()`。显式剧情 `portrait.region` 仍是绝对像素，换图须同步更新。改变网格列数/行数属于程序改动，不能只换素材。
+
+建筑的 `sprite_index` 可选填 0–7，优先于同类映射；范围由 `content_tables.gd` 的 `BUILDING_ATLAS_GRID` 约束。`cave_board.gd` 的 `_sprite_index()` 同时供绘制与透明像素命中使用，单格比例也从纹理推导。
 
 洞天有两套坐标：规则层的整数格坐标和界面层的像素坐标。`project()` 正向投影，`cell_at()` 逆向定位，`structure_rect()` 同时服务建筑绘制与透明像素命中。只改绘制、不改命中，会造成屋顶看得到却点不中。
 
@@ -397,6 +401,7 @@ Godot 可在脚本左侧设置断点，使用单步跳过、单步进入、继�
 | 剧情版本不对 | `Story.presentation()` | 节点 ID、0/1/2 阶段、主线三份版本与支线 default |
 | 对话读完却没有结果 | `StoryFlow.advance()` | expected_id/line、active、reasons、costs、完成记录；最后一行才提交 |
 | 解锁过早或未开放 | `apply_pending_unlocks()` / `availability()` | 生效回合、requires_unlock、unlocked_activities、min_phase |
+| 有材料却不能建造 | `Cave.blueprint_error()` / `build()` | initial_blueprints、unlocked_blueprints、pending_blueprint_unlocks，以及占地与建材 |
 | 数据变了但界面没变 | 状态提交处 / `_refresh()` | 是否发信号、是否订阅、控件是否可见 |
 
 `forecast()` 在预览时也会被调用，断点可能频繁停住。只想追实际入库时，先在 `settle()` 打断点，再单步进入 `forecast()`。
@@ -440,7 +445,9 @@ godot --path . --headless res://scenes/validate_content.tscn
 godot --path . --headless res://scenes/smoke_test.tscn
 ```
 
-成功标记：`SMOKE_TEST_OK`。包含培养、压力边界、A/B、道路、派工、景观、材料竞争、跨回合加工和防重复等案例。
+成功标记：`SMOKE_TEST_OK`。包含培养、压力边界、A/B、道路、派工、景观、材料竞争、跨回合加工和防重复等案例。`_run_review_regressions()` 还覆盖压力档缺字段/错误类型/非有限数值、图格序号、替换尺寸裁切，以及剧情检查提前返回时的回合通知。
+
+`_run_blueprints()` 验证图纸不消耗、逐栋建材、缺图无副作用、剧情发放与生效时点、重复奖励和新局重置。窗口测试中的 `_capture_blueprint_ui()` 临时用丹炉验证锁定、末句预告、下回合开放和连续建造；不修改正式剧情表。
 
 这里有默认数值断言，例如初始属性、配方产量和默认三槽。作者主动调整数值时，可能出现“配置合法，但旧例子的期望值不再成立”；先确认新规则，再更新受影响的测试，不能为全绿而盲改断言。
 
@@ -451,6 +458,8 @@ godot --path . res://scenes/smoke_test.tscn -- --ui-snapshot=/tmp/xiuxian-handbo
 ```
 
 该命令不能加 `--headless`。独立的 `--` 后面是传给本工程脚本的参数。截图输出到指定目录，覆盖三种窗口尺寸、阶段立绘、菜单、日程、建筑、派工和结果。它触发真实控件信号及地块输入，但不是所有真人键鼠路径的穷举测试。
+
+其中 `_check_replacement_assets()` 临时替换内存资源缓存，检查不同尺寸下家园与支线回退一致、专用立绘遵循显式区域、建筑显示与透明命中一致；测试结束恢复资源，不修改 PNG。
 
 需要人工再看：图片是否完整、文字是否遮挡、按钮是否能点、菜单是否能返回、结算后管理是否锁定。代码检查通过不代表美术或交互已经验收。
 
