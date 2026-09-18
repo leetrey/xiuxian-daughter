@@ -1,8 +1,8 @@
 # 开发与调试手册
 
-适用范围：当前 Godot 原型。编写日期：2026-09-17，本机验证版本为 Godot 4.7.1，代码语言为 GDScript。
+适用范围：当前 Godot 原型。更新日期：2026-09-18，本机验证版本为 Godot 4.7.1，代码语言为 GDScript。
 
-这份手册讲如何修改和排查现有工程，不代替玩法设计。规则看 [01 主体设计基线](01-game-design.md)，真实实现范围看 [05 开发进度](05-development-progress.md)，物品、配方和活动填表看 [06 内容填写指南](06-content-authoring.md)。剧情、存档、冒险、战斗、继承仍未实现，不能靠新增几个 JSON 字段直接启用。
+这份手册讲如何修改和排查现有工程，不代替玩法设计。规则看 [01 主体设计基线](01-game-design.md)，真实实现范围看 [05 开发进度](05-development-progress.md)，内容填表看 [06 内容填写指南](06-content-authoring.md)。剧情已接入线性播放、完成、物品结算和活动解锁；父亲恢复、存档、冒险、战斗、继承仍未实现，不能靠新增几个 JSON 字段直接启用。
 
 ## 目录
 
@@ -136,6 +136,9 @@ docs/                       当前设计、进度、填表和开发说明
 | 状态 | [game_state.gd](../scripts/game_state.gd) | 读取配置，保存属性、库存、草稿、洞天与阶段，初始化和推进本局 |
 | 培养规则 | [schedule_manager.gd](../scripts/schedule_manager.gd) | 校验日程，扣费，压力概率，成长，自由活动 |
 | 洞天规则 | [cave_rules.gd](../scripts/cave_rules.gd) | 占地、道路、派工、景观乘区、预测与生产入库 |
+| 剧情查询 | [story_rules.gd](../scripts/story_rules.gd) | 节点校验、条件不满足原因、候选顺序、三阶段表现；只读 |
+| 剧情执行 | [story_flow.gd](../scripts/story_flow.gd) | 检查点与当前对话、末句完成、物品结算和待生效活动解锁 |
+| 剧情界面 | [story_ui.gd](../scripts/story_ui.gd) | 背景、立绘、台词、费用奖励预告、推进按钮 |
 | 配置校验 | [content_tables.gd](../scripts/content_tables.gd) | 解析 JSON，检查物品数量、分类与跨表引用 |
 | 主界面 | [main.gd](../scripts/main.gd) | 家园、立绘、菜单、按钮、闲置弹窗和成长札记 |
 | 洞天界面 | [cave_ui.gd](../scripts/cave_ui.gd) | 工具模式、建筑目录、配方、御灵和产出详情 |
@@ -143,7 +146,7 @@ docs/                       当前设计、进度、填表和开发说明
 | 公共外观 | [ui_theme.gd](../scripts/ui_theme.gd) | 字体、颜色、图标和按钮状态 |
 | 验证 | [validate_content.gd](../scripts/validate_content.gd)、[smoke_test.gd](../scripts/smoke_test.gd) | 作者填表检查、规则回归、实际窗口走查 |
 
-只有 `GameState` 和 `ScheduleManager` 是 Autoload，项目启动时自动创建。`Cave` 和 `Content` 是 `GameState` 预加载的普通工具脚本，通过静态方法调用，不是另外两份全局状态。
+只有 `GameState` 和 `ScheduleManager` 是 Autoload，项目启动时自动创建。`Cave`、`Content`、`Story`、`StoryFlow` 是 `GameState` 预加载的普通脚本，通过静态方法调用；剧情真实状态也只存在 GameState 中。
 
 ### 常见写法
 
@@ -167,9 +170,11 @@ docs/                       当前设计、进度、填表和开发说明
 ```text
 project.godot
   -> GameState._ready()
-     -> _load_configs() 读取四份 JSON
-     -> 校验内容及引用
+     -> _load_configs() 读取五份 JSON
+        -> 校验内容及引用
+        -> configs_validated = true（加载函数正常完成后才标记）
      -> reset_game() 从配置创建本局数据
+        -> StoryFlow.begin("turn_start") 选择开始剧情或直接进入 FREE
   -> ScheduleManager Autoload 就绪
   -> scenes/main.tscn
      -> main._ready() 创建控件并连接信号
@@ -201,13 +206,15 @@ main._confirm()
      -> FREE 改为 RESOLVING，锁住操作
      -> 逐槽：当前压力 -> 随机结果 -> 扣材料 -> 增长 -> 更新压力
      -> Cave.settle() 统一生产扣料与入库
-     -> 保存结果，切到 RESULTS，广播刷新
+     -> StoryFlow.begin("turn_end") 进入主/支线对话，没有剧情则直接 RESULTS
+     -> 读完剧情后切到 RESULTS，展示完整札记
   -> 玩家在札记点击下一回合
   -> GameState.advance_turn()
-     -> 清日程、回精力、保留压力与洞天；最后一回合则 FINISHED
+     -> 清日程、回精力、激活到期活动解锁、检查开始剧情
+     -> 保留压力、洞天与剧情完成记录；最后一回合则 FINISHED
 ```
 
-这里描述当前实际流程，不包含尚未接入的主支线判断或回合末天赋。`phase` 是操作阶段，`growth_phase()` 的 0/1/2 是成长阶段，不要混为同一变量。
+这里描述当前实际流程，不包含尚未接入的父亲升级与回合末天赋。`phase` 是操作阶段，新增的 STORY 表示正在对话；`growth_phase()` 的 0/1/2 是成长阶段，不要混为同一变量。
 
 ### 建造与生产
 
@@ -270,6 +277,51 @@ main._confirm()
 6. 加正常、拒绝和重复调用的必要测试，更新 05 的真实实现范围。
 
 已有接口不全是同一种返回值：`assign_slot()` / 各种 `*_error()` 返回错误字符串，空字符串代表通过；`confirm_schedule()` / 洞天操作通常返回含 `ok`、`message` 的字典。调用前先读函数说明，不要统一写成 `result.ok`。
+
+### 调试剧情条件与表现
+
+剧情条件层仍可独立测试，不必真正播放并消耗材料。以下代码适合放在 `smoke_test.gd` 的测试函数中，不是终端命令：
+
+```gdscript
+var context := GameState.story_context()
+# 修改的是副本，不会给女儿实际增加属性。
+context.base_stats = {"power": 1001}
+var candidates := GameState.Story.candidates(
+    GameState.story_config, context, "turn_end", "main"
+)
+print(candidates) # 默认配置含 example_breakthrough。
+var variant := GameState.Story.presentation(
+    GameState.story_config, "example_breakthrough", 1
+)
+print(variant.lines) # 同一节点的中期版本，不会标记完成。
+```
+
+`story_context()` 复制本局回合、成长阶段、A、真实库存和完成 ID，不复制装备 B 或预计生产。测试不同进度可传 `GameState.story_context(["example_breakthrough"])` 或 `GameState.story_context([])` 覆盖快照中的完成列表，但不改变真实进度。
+
+候选为空时，在 `Story.blocking_reasons()` 查看返回的原因列表；表现错误时在 `Story.presentation()` 检查节点 ID 与 `growth_phase`。主线不会默认退回其他年龄版本来掩盖缺失内容，支线才有公共 `default` 版本。
+
+只检查自己的文本和条件，用内容校验场景的附加参数即可，不必修改脚本：
+
+```bash
+godot --path . --headless res://scenes/validate_content.tscn -- --story-preview
+```
+
+该命令用新局真实状态打印条件结果，另外列出三阶段表现；不会推进游戏内对话。不要在 `_refresh()` 中把候选自动当成已完成任务。
+
+真实执行链为：
+
+```text
+StoryFlow.begin(checkpoint) -> 主线候选 -> 当前节点/版本/第 0 行
+story_ui 的箭头按钮 -> StoryFlow.advance(屏幕节点 ID, 屏幕行号)
+  -> 非末句：只加行号
+  -> 末句：重新检查 -> 扣 costs -> 发 rewards.items -> 记录活动解锁 -> 记录 completed
+  -> 重新查询同类候选；主线耗尽后处理支线
+  -> 全部读完返回 FREE 或 RESULTS
+```
+
+`GameState.story` 保存 active、completed、checked 和当前回合 results；`unlocked_activities` 与 `pending_activity_unlocks` 单独保存即时/延后活动解锁。检查点一回合只进入一次，同一逻辑节点本局只完成一次。`StoryFlow.advance()` 会拒绝旧 ID/行号提交，不能直接用 `completed[id] = true` 冒充结算。
+
+在测试里切换阶段不会自动检查剧情；真实入口是新局或 `advance_turn()`，回合末入口是培养确认后。测试剧情读完前不得期待 FREE，必须逐句推进；旧培养单元测试临时用空剧情表隔离，另有真实流程集成测试，不在正式游戏加“跳过剧情”开关。
 
 ### 不要破坏的边界
 
@@ -341,6 +393,10 @@ Godot 可在脚本左侧设置断点，使用单步跳过、单步进入、继�
 | 派工失败 | `assign_worker()` | `building_id`、`slot`、`worker_id`、预演后的容量与居民数 |
 | 产量不对 | `forecast()` / `multipliers()` | `budget`、`row.reason`、`inputs`、`outputs`、`factors` |
 | 看起来重复入库 | `settle()` | `phase`、`turn`、`last_production_turn` |
+| 剧情没有成为候选 | `Story.blocking_reasons()` | 检查点、main/side、A、真实库存、完成 ID 与未满足原因 |
+| 剧情版本不对 | `Story.presentation()` | 节点 ID、0/1/2 阶段、主线三份版本与支线 default |
+| 对话读完却没有结果 | `StoryFlow.advance()` | expected_id/line、active、reasons、costs、完成记录；最后一行才提交 |
+| 解锁过早或未开放 | `apply_pending_unlocks()` / `availability()` | 生效回合、requires_unlock、unlocked_activities、min_phase |
 | 数据变了但界面没变 | 状态提交处 / `_refresh()` | 是否发信号、是否订阅、控件是否可见 |
 
 `forecast()` 在预览时也会被调用，断点可能频繁停住。只想追实际入库时，先在 `settle()` 打断点，再单步进入 `forecast()`。

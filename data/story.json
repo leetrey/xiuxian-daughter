@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "note": "剧情播放样例，不是正式剧情。末句确认后才记录完成并提交费用和奖励；正式文本、门槛与奖励由作者填写。",
+  "nodes": [
+    {
+      "id": "example_breakthrough",
+      "name": "灵息初成（示例）",
+      "note": "1000 是门槛示例，须严格超过。三阶段表现共用一个节点，不代表新增三次突破。",
+      "kind": "main",
+      "order": 100,
+      "checkpoints": ["turn_start", "turn_end"],
+      "requires_completed": [],
+      "excludes_completed": [],
+      "conditions": {"total_a_gt": 1000},
+      "rewards": {"items": {"clearheart_pill": 1}},
+      "variants": {
+        "0": {
+          "portrait": {"texture": "res://assets/daughter_stages.png", "region": [0, 0, 512, 1024]},
+          "lines": [
+            {"speaker": "女儿", "text": "爹爹，我闭上眼睛，也能感觉到那一缕暖意。"},
+            {"speaker": "养父", "text": "记住这个感觉。修行不急，先让这口气安稳下来。"}
+          ]
+        },
+        "1": {
+          "portrait": {"texture": "res://assets/daughter_stages.png", "region": [512, 0, 512, 1024]},
+          "lines": [
+            {"speaker": "女儿", "text": "往日散乱的灵息，今天似乎终于连在了一起。"},
+            {"speaker": "养父", "text": "是你日积月累的功夫。先稳住心神，再向前走。"}
+          ]
+        },
+        "2": {
+          "portrait": {"texture": "res://assets/daughter_stages.png", "region": [1024, 0, 512, 1024]},
+          "lines": [
+            {"speaker": "女儿", "text": "这一步虽来得晚些，我却比从前更明白自己为何修行。"},
+            {"speaker": "养父", "text": "修行不是与旁人争早晚。你能走稳自己的路，就很好。"}
+          ]
+        }
+      }
+    },
+    {
+      "id": "example_herb_conversation",
+      "name": "草木闲话（示例）",
+      "note": "只示范支线公共文本与库存门槛，持有条件不是消耗，不替代 T1/T2/T3 正式教学。",
+      "kind": "side",
+      "order": 100,
+      "checkpoints": ["turn_start"],
+      "conditions": {"turn_min": 1, "inventory_min": {"clearheart_grass": 1}},
+      "variants": {
+        "default": {
+          "lines": [
+            {"speaker": "养父", "text": "这是清心草。心绪纷乱的时候，它能帮你静下心来。"},
+            {"speaker": "女儿", "text": "那我会好好记住它的模样。"}
+          ]
+        }
+      }
+    }
+  ]
+}

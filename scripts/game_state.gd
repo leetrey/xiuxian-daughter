@@ -1,21 +1,31 @@
 extends Node
 
 # 本局状态只有一份；UI 读取它，ScheduleManager 提交培养与活动结果。
-# 尚未实现剧情、存档和继承选择，不保留旧月份和经验条逻辑。
+# 剧情条件只读、播放提交独立；存档与继承选择尚未实现。
 signal state_changed
 # phase 是本回合的操作阶段；growth_phase() 才是用于日程开放和立绘的成长阶段。
-enum Phase { FREE, RESOLVING, RESULTS, FINISHED }
+enum Phase { FREE, RESOLVING, RESULTS, FINISHED, STORY }
 const CONFIG_PATH := "res://data/cultivation.json"
 const CAVE_CONFIG_PATH := "res://data/cave.json"
 const ITEMS_PATH := "res://data/items.json"
 const RECIPES_PATH := "res://data/recipes.json"
+const STORY_PATH := "res://data/story.json"
 const Cave = preload("res://scripts/cave_rules.gd")
 const Content = preload("res://scripts/content_tables.gd")
+const Story = preload("res://scripts/story_rules.gd")
+const StoryFlow = preload("res://scripts/story_flow.gd")
 
 # 配置是内容模板；下方 inventory、cave 等才是会随玩家操作变化的本局数据。
 var config: Dictionary = {}
 var cave_config: Dictionary = {}
+var story_config: Dictionary = {}
+var story: Dictionary = {}
+var unlocked_activities: Array[String] = []
+# 活动 ID -> 最早生效回合；与剧情完成记录分开，不能用已读节点冒充已经开放。
+var pending_activity_unlocks: Dictionary = {}
 var config_error := ""
+# 只有全部配置检查返回成功才置真，防止脚本异常中断加载后仍打印校验成功。
+var configs_validated := false
 var cave: Dictionary = {}
 var last_production: Dictionary = {}
 # 生产提交标记与报告分开，避免重复确认同一回合时再次发放产物。
@@ -39,6 +49,8 @@ var rng := RandomNumberGenerator.new()
 ## Autoload 先于主场景初始化；配置失败时直接停止，避免用半份配置继续运行。
 func _ready() -> void:
 	config_error = _load_configs()
+	if not configs_validated and config_error.is_empty():
+		config_error = "配置初始化未完成，请检查前面的脚本错误"
 	if not config_error.is_empty():
 		push_error(config_error)
 		get_tree().quit(1)
@@ -47,14 +59,16 @@ func _ready() -> void:
 
 
 func _load_configs() -> String:
+	configs_validated = false
 	var sources: Dictionary = {}
-	for path in [CONFIG_PATH, CAVE_CONFIG_PATH, ITEMS_PATH, RECIPES_PATH]:
+	for path in [CONFIG_PATH, CAVE_CONFIG_PATH, ITEMS_PATH, RECIPES_PATH, STORY_PATH]:
 		var result := Content.read_object(path)
 		if not str(result.error).is_empty():
 			return str(result.error)
 		sources[path] = result.data
 	config = sources[CONFIG_PATH]
 	cave_config = sources[CAVE_CONFIG_PATH]
+	story_config = sources[STORY_PATH]
 	if config.has("items"):
 		return "data/cultivation.json: 物品定义请放到 data/items.json，不能重复定义 items"
 	if cave_config.has("recipes"):
@@ -67,7 +81,17 @@ func _load_configs() -> String:
 	config.items = sources[ITEMS_PATH].items
 	cave_config.recipes = sources[RECIPES_PATH].recipes
 	var error := validate_config()
-	return error if not error.is_empty() else validate_cave_config()
+	if not error.is_empty():
+		return error
+	error = validate_cave_config()
+	if not error.is_empty():
+		return error
+	error = Story.validate_config(story_config, config.items, config.activities)
+	if not error.is_empty():
+		return error
+	# 标记放在加载函数末尾；若此函数直接因脚本异常中断，调用方不能替它宣布成功。
+	configs_validated = true
+	return ""
 
 
 ## 校验培养表及其物品引用；返回空字符串表示通过，否则返回首个可定位的问题。
@@ -132,6 +156,8 @@ func validate_config() -> String:
 		ids.append(str(activity.id))
 		if int(activity.get("energy_cost", 0)) < 0:
 			return "活动精力成本不能为负"
+		if activity.has("requires_unlock") and not activity.requires_unlock is bool:
+			return path + ".requires_unlock: 需要布尔值"
 		for key in activity.growth:
 			if not names.has(key) or float(activity.growth[key]) < 0:
 				return "活动成长引用了未知属性或负数: " + str(key)
@@ -169,11 +195,14 @@ func reset_game(random_seed: int = -1) -> void:
 		cave.workers.append(worker)
 	last_production.clear()
 	last_production_turn = 0
+	story = {"completed": {}, "checked": {}, "checkpoint": "", "kind": "", "active": {}, "results": []}
+	unlocked_activities.clear()
+	pending_activity_unlocks.clear()
 	if random_seed < 0:
 		rng.randomize()
 	else:
 		rng.seed = random_seed
-	state_changed.emit()
+	StoryFlow.begin("turn_start")
 
 
 ## 先验证配方中的物品，再验证建筑可用配方，保证后续跨表查询有合法目标。
@@ -308,6 +337,18 @@ func total_turns() -> int:
 	return total
 
 
+## 给只读剧情查询提供独立快照，刻意不包含装备 B 或生产预测。
+## 默认读取本局完成记录；测试可显式传 [] 或其他列表来覆盖，不写回本局。
+func story_context(completed: Variant = null) -> Dictionary:
+	return {
+		"turn": turn,
+		"growth_phase": growth_phase(),
+		"base_stats": base_stats.duplicate(true),
+		"inventory": inventory.duplicate(true),
+		"completed": story.completed.keys() if completed == null else completed.duplicate(),
+	}
+
+
 ## 仅从结果阶段前进；保留属性、压力、库存和洞天安排，清空女儿日程草稿。
 func advance_turn() -> bool:
 	if phase != Phase.RESULTS:
@@ -319,6 +360,10 @@ func advance_turn() -> bool:
 		energy = int(config.rules.max_energy)
 		plan.fill("")
 		phase = Phase.FREE
+		story.results.clear()
+		StoryFlow.apply_pending_unlocks()
 		# 压力不在此恢复；未来回合末天赋应在独立结算位置执行。
+		StoryFlow.begin("turn_start")
+		return true
 	state_changed.emit()
 	return true

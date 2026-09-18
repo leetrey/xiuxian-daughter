@@ -1,23 +1,39 @@
 extends Node
 
-# 一份场景覆盖培养与洞天主干。--ui-snapshot=/tmp/目录 可导出真实渲染截图。
+# 一份场景覆盖培养、洞天、剧情查询与执行。--ui-snapshot=/tmp/目录 可导出真实渲染截图。
 # 这些是程序回归例子，含默认数值断言；作者仅检查填表应运行 validate_content.tscn。
 var failures := 0
 var ui_completed := false
+var story_completed := false
+var story_flow_completed := false
+var story_ui_completed := false
 
 
 ## 默认只跑规则；带截图参数时才创建界面。退出码便于终端判断，不只依赖最后一行文字。
 func _ready() -> void:
-	if not GameState.config_error.is_empty():
+	if not GameState.configs_validated or not GameState.config_error.is_empty():
+		printerr("SMOKE_TEST_FAILED: 配置初始化未完成")
 		get_tree().quit(1)
 		return
+	# 旧规则用空剧情表隔离前置对话；下方另用真实剧情流程验证集成，不在正式代码加跳过开关。
+	var story_config: Dictionary = GameState.story_config
+	GameState.story_config = {"version": 1, "nodes": []}
 	_run_content_rules()
+	_run_story_rules(story_config)
+	_check(story_completed, "剧情规则测试必须完整执行，脚本中断不得报成功")
 	_run_rules()
 	_run_cave_rules()
 	for argument in OS.get_cmdline_user_args():
 		if argument.begins_with("--ui-snapshot="):
 			await _capture_ui(argument.trim_prefix("--ui-snapshot="))
 			_check(ui_completed, "真实窗口走查必须完整执行，脚本中断不得报成功")
+	GameState.story_config = story_config
+	_run_story_flow()
+	_check(story_flow_completed, "剧情执行测试必须完整执行")
+	for argument in OS.get_cmdline_user_args():
+		if argument.begins_with("--ui-snapshot="):
+			await _capture_story_ui(argument.trim_prefix("--ui-snapshot="))
+			_check(story_ui_completed, "剧情窗口走查必须完整执行")
 	if failures == 0:
 		print("SMOKE_TEST_OK")
 	else:
@@ -118,6 +134,275 @@ func _run_content_rules() -> void:
 	GameState.config.items = items
 	GameState.cave_config = cave
 	GameState.reset_game()
+
+
+## 剧情查询只读；完成记录由测试显式传入，不把候选查询冒充正式剧情推进。
+func _run_story_rules(source: Dictionary) -> void:
+	_check(GameState.Story.validate_config(source, GameState.config.items).is_empty(), "剧情示例配置有效")
+	_check(GameState.Story.validate_config({"version": 1, "nodes": []}, GameState.config.items).is_empty(), "允许暂不填写剧情")
+	var bad_root_fields := {"version": 2, "nodes": {}, "note": false, "rewards": {}}
+	for field in bad_root_fields:
+		var changed: Dictionary = source.duplicate(true)
+		changed[field] = bad_root_fields[field]
+		_check(not GameState.Story.validate_config(changed, GameState.config.items).is_empty(), "剧情根字段校验 " + str(field))
+	var bad_node_fields := {
+		"id": " ", "name": "", "kind": "unknown", "enabled": 1, "order": true,
+		"checkpoints": ["before_battle"], "requires_completed": "example_herb_conversation",
+		"excludes_completed": ["missing"], "conditions": [], "variants": [], "rewards": [],
+	}
+	for field in bad_node_fields:
+		var changed: Dictionary = source.duplicate(true)
+		changed.nodes[0][field] = bad_node_fields[field]
+		_check(not GameState.Story.validate_config(changed, GameState.config.items).is_empty(), "剧情节点字段校验 " + str(field))
+	for conditions in [
+		{"turn_min": 0}, {"turn_max": 1.5}, {"turn_min": 3, "turn_max": 2},
+		{"total_a_gt": -1}, {"total_a_gt": "1000"}, {"total_a_gt": true},
+		{"growth_phases": []}, {"growth_phases": [0, 3]}, {"growth_phases": [1, 1]},
+		{"growth_phases": [true]}, {"inventory_min": {"missing": 1}},
+		{"inventory_min": {"wood": 0}}, {"inventory_min": {"wood": 1.5}}, {"total_b_gt": 10},
+	]:
+		var changed: Dictionary = source.duplicate(true)
+		changed.nodes[0].conditions = conditions
+		_check(GameState.Story.validate_config(changed, GameState.config.items).contains("conditions"), "剧情条件错误定位到字段")
+	for variant in [
+		{}, {"lines": []}, {"lines": [{"speaker": 1, "text": "台词"}]},
+		{"lines": [{"speaker": "女儿", "text": " "}]},
+		{"lines": [{"speaker": "女儿", "text": "台词", "choice": "暂不支持"}]},
+	]:
+		var changed: Dictionary = source.duplicate(true)
+		changed.nodes[0].variants["0"] = variant
+		_check(GameState.Story.validate_config(changed, GameState.config.items).contains("variants.0"), "剧情对话错误定位到版本")
+	for portrait in [
+		{"texture": "res://assets/missing-story-test.png"},
+		{"texture": "res://scenes/main.tscn"},
+		{"texture": "res://assets/daughter_stages.png", "region": [0, 0, 0, 1024]},
+		{"texture": "res://assets/daughter_stages.png", "region": [1024, 0, 513, 1024]},
+	]:
+		var changed: Dictionary = source.duplicate(true)
+		changed.nodes[0].variants["0"].portrait = portrait
+		_check(GameState.Story.validate_config(changed, GameState.config.items).contains("portrait"), "立绘引用和裁剪校验")
+	var changed: Dictionary = source.duplicate(true)
+	changed.nodes[0].variants.erase("2")
+	_check(GameState.Story.validate_config(changed, GameState.config.items).contains("variants.2"), "主线必须填写三阶段表现")
+	changed = source.duplicate(true)
+	changed.nodes[1].variants.erase("default")
+	_check(GameState.Story.validate_config(changed, GameState.config.items).contains("variants.default"), "支线公共表现不能缺失")
+	changed = source.duplicate(true)
+	changed.nodes.append(changed.nodes[0].duplicate(true))
+	_check(GameState.Story.validate_config(changed, GameState.config.items).contains("ID 重复"), "同一逻辑节点不能重复定义")
+	for prerequisites in [["missing"], ["example_breakthrough"], ["example_herb_conversation", "example_herb_conversation"]]:
+		changed = source.duplicate(true)
+		changed.nodes[0].requires_completed = prerequisites
+		_check(GameState.Story.validate_config(changed, GameState.config.items).contains("requires_completed"), "拒绝未知、自身或重复前置")
+	changed = source.duplicate(true)
+	changed.nodes[0].requires_completed = ["example_herb_conversation"]
+	changed.nodes[0].excludes_completed = ["example_herb_conversation"]
+	_check(not GameState.Story.validate_config(changed, GameState.config.items).is_empty(), "前置与排除条件不能直接矛盾")
+	changed.nodes[0].excludes_completed = []
+	changed.nodes[1].requires_completed = ["example_breakthrough"]
+	_check(GameState.Story.validate_config(changed, GameState.config.items).contains("循环"), "拒绝前置依赖环")
+
+	GameState.reset_game(42)
+	GameState.equipment_bonuses.weapon.power = 10000
+	var rng_state: int = GameState.rng.state
+	var stats: Dictionary = GameState.base_stats.duplicate(true)
+	var stock: Dictionary = GameState.inventory.duplicate(true)
+	var context := GameState.story_context()
+	_check(GameState.Story.candidates(source, context, "turn_start", "main").is_empty(), "装备 B 不能满足剧情 A 门槛")
+	_check(GameState.Story.candidates(source, context, "turn_start", "side") == ["example_herb_conversation"], "主支线候选分开查询")
+	_check(GameState.Story.candidates(source, context, "unknown", "main").is_empty(), "未知检查点不返回候选")
+	context.base_stats = {"power": 1000}
+	_check(GameState.Story.candidates(source, context, "turn_end", "main").is_empty(), "剧情严格大于门槛，等于不触发")
+	context.base_stats.power = 1001
+	_check(GameState.Story.candidates(source, context, "turn_end", "main") == ["example_breakthrough"], "超过 A 门槛成为候选")
+	context.completed.append("example_breakthrough")
+	for stage in range(3):
+		context.growth_phase = stage
+		_check(GameState.Story.candidates(source, context, "turn_end", "main").is_empty(), "换成长阶段不能重复完成同一逻辑 ID")
+		var variant: Dictionary = GameState.Story.presentation(source, "example_breakthrough", stage)
+		_check(variant.portrait.region[0] == stage * 512, "三阶段选择对应立绘区域")
+		variant.lines[0].text = "不应写回配置"
+		_check(source.nodes[0].variants[str(stage)].lines[0].text != "不应写回配置", "表现副本不污染配置")
+		_check(GameState.Story.presentation(source, "example_herb_conversation", stage) == source.nodes[1].variants.default, "支线使用公共版本")
+	_check(GameState.Story.presentation(source, "missing", 0).is_empty(), "未知节点无表现")
+	_check(GameState.Story.presentation(source, "example_breakthrough", 3).is_empty(), "未知成长阶段不能选错版本")
+	changed = source.duplicate(true)
+	changed.nodes[1].variants["1"] = {"lines": [{"speaker": "女儿", "text": "支线中期覆盖示例"}]}
+	_check(GameState.Story.validate_config(changed, GameState.config.items).is_empty(), "支线可以增加阶段覆盖文本")
+	_check(GameState.Story.presentation(changed, "example_herb_conversation", 1).lines[0].text == "支线中期覆盖示例", "阶段覆盖优先于公共版本")
+	_check(GameState.Story.presentation(changed, "example_herb_conversation", 2) == source.nodes[1].variants.default, "未覆盖阶段仍使用公共版本")
+	context.inventory.clearheart_grass = 0
+	_check(GameState.Story.candidates(source, context, "turn_start", "side").is_empty(), "库存条件按真实数量判断")
+	_check(GameState.base_stats == stats and GameState.inventory == stock and GameState.rng.state == rng_state, "剧情快照查询不修改属性库存随机源")
+	_check(GameState.story_config.nodes.is_empty() and GameState.plan.count("") == 3, "剧情查询不写配置或日程")
+
+	# 用内存例子验证前置、排除、时段和稳定排序，不向正式内容表扩充剧情。
+	changed = source.duplicate(true)
+	changed.nodes[1] = changed.nodes[0].duplicate(true)
+	changed.nodes[1].id = "a_followup"
+	changed.nodes[1].requires_completed = ["example_breakthrough"]
+	context = GameState.story_context()
+	context.base_stats = {"power": 2000}
+	_check(GameState.Story.candidates(changed, context, "turn_start", "main") == ["example_breakthrough"], "前置成为候选不等于完成，不自动串联")
+	context.completed = ["example_breakthrough"]
+	_check(GameState.Story.candidates(changed, context, "turn_start", "main") == ["a_followup"], "显式完成前置后才可查询后续")
+	context.completed = []
+	changed.nodes[1].requires_completed = []
+	_check(GameState.Story.candidates(changed, context, "turn_start", "main") == ["a_followup", "example_breakthrough"], "同 order 时按 ID 确定顺序")
+	changed.nodes[1].order = 200
+	_check(GameState.Story.candidates(changed, context, "turn_start", "main") == ["example_breakthrough", "a_followup"], "不同 order 先按数值排序")
+	changed.nodes[1].excludes_completed = ["example_breakthrough"]
+	context.completed = ["example_breakthrough"]
+	_check(GameState.Story.candidates(changed, context, "turn_start", "main").is_empty(), "已完成排除节点会阻止触发")
+	var node: Dictionary = changed.nodes[0]
+	node.conditions = {"turn_min": 3, "turn_max": 5, "growth_phases": [1]}
+	context.completed = []
+	context.growth_phase = 1
+	for turn in [2, 3, 5, 6]:
+		context.turn = turn
+		_check(GameState.Story.blocking_reasons(node, context, "turn_start", "main").is_empty() == (turn >= 3 and turn <= 5), "允许回合区间包含两端")
+	context.turn = 3
+	context.growth_phase = 0
+	_check(not GameState.Story.blocking_reasons(node, context, "turn_start", "main").is_empty(), "成长阶段限制独立于回合")
+	node.conditions = {}
+	node.enabled = false
+	_check(not GameState.Story.blocking_reasons(node, context, "turn_start", "main").is_empty(), "已禁用节点不成为候选")
+
+	# 预测出的药草不能满足剧情库存门槛；真实生产入库后才可以。
+	GameState.reset_game(42)
+	_build("herb_field", Vector2i(1, 2), "grow_qingyun")
+	changed = source.duplicate(true)
+	changed.nodes[0].conditions = {"inventory_min": {"qingyun_grass": 1}}
+	_check(GameState.Cave.preview().produced.qingyun_grass > 0, "存在预计收成")
+	_check(GameState.Story.candidates(changed, GameState.story_context(), "turn_end", "main").is_empty(), "未入库预测不能满足剧情条件")
+	_fill()
+	_check(ScheduleManager.confirm_schedule().ok, "剧情库存测试先完成正常培养生产")
+	stock = GameState.inventory.duplicate(true)
+	_check(GameState.Story.candidates(changed, GameState.story_context(), "turn_end", "main") == ["example_breakthrough"], "生产入库后剧情条件可满足")
+	_check(GameState.inventory == stock, "满足持有条件不等于消耗材料")
+	GameState.reset_game()
+	story_completed = true
+
+
+func _story_fixture(id: String, kind: String = "main", checkpoint: String = "turn_start") -> Dictionary:
+	var node: Dictionary = GameState.story_config.nodes[0].duplicate(true)
+	node.id = id
+	node.name = id
+	node.kind = kind
+	node.order = 100
+	node.checkpoints = [checkpoint]
+	node.conditions = {}
+	node.requires_completed = []
+	node.excludes_completed = []
+	node.costs = {}
+	node.rewards = {}
+	if kind == "side":
+		node.variants = {"default": node.variants["0"].duplicate(true)}
+	return node
+
+
+func _finish_active_story() -> void:
+	if GameState.story.active.is_empty():
+		_check(false, "需要一条正在播放的剧情")
+		return
+	var id: String = GameState.story.active.node.id
+	var remaining: int = GameState.story.active.presentation.lines.size() - int(GameState.story.active.line)
+	for i in range(remaining):
+		var result: Dictionary = GameState.StoryFlow.advance(id, int(GameState.story.active.line))
+		_check(result.ok, "逐句推进剧情: " + str(result.message))
+		if not result.ok:
+			return
+
+
+## 真实检查点与提交路径：主线 -> 支线；结束逐项重查；成本与奖励不在 UI 刷新中执行。
+func _run_story_flow() -> void:
+	var original: Dictionary = GameState.story_config
+	var activities: Array = GameState.config.activities.duplicate(true)
+	var first := _story_fixture("a_start")
+	first.costs = {"wood": 2}
+	first.rewards = {"items": {"clearheart_grass": 1}, "activities": ["music"], "unlock_timing": "next_turn"}
+	var follow := _story_fixture("b_follow")
+	follow.requires_completed = ["a_start"]
+	var competition := _story_fixture("c_competition")
+	competition.costs = {"wood": 35, "stone": 1}
+	var side := _story_fixture("d_side", "side")
+	side.order = 0
+	side.rewards = {"activities": ["craft"], "unlock_timing": "immediate"}
+	var from_side := _story_fixture("e_from_side")
+	from_side.requires_completed = ["d_side"]
+	from_side.checkpoints = ["turn_start", "turn_end"]
+	var ending := _story_fixture("f_end", "main", "turn_end")
+	ending.order = 0
+	ending.costs = {"qingyun_grass": 1}
+	ending.rewards = {"items": {"clearheart_pill": 1}}
+	var config := {"version": 1, "nodes": [first, follow, competition, side, from_side, ending]}
+	_check(GameState.Story.validate_config(config, GameState.config.items, activities).is_empty(), "可执行剧情配置和奖励引用通过校验")
+	for reward in [{"items": {"missing": 1}}, {"items": {"wood": 0}}, {"activities": ["missing"]}, {"activities": ["music", "music"]}, {"unlock_timing": "later"}, {"land": 2}]:
+		var invalid: Dictionary = config.duplicate(true)
+		invalid.nodes[0].rewards = reward
+		_check(GameState.Story.validate_config(invalid, GameState.config.items, activities).contains("rewards"), "无效奖励不会静默接受")
+	var invalid: Dictionary = config.duplicate(true)
+	invalid.nodes[0].costs = {"wood": 1.5}
+	_check(GameState.Story.validate_config(invalid, GameState.config.items, activities).contains("costs"), "剧情费用必须是合法物品整数")
+	GameState.story_config = config
+	ScheduleManager.activity_by_id("music").requires_unlock = true
+	ScheduleManager.activity_by_id("craft").requires_unlock = true
+	GameState.reset_game(42)
+	var stock: Dictionary = GameState.inventory.duplicate(true)
+	var rng_state: int = GameState.rng.state
+	_check(GameState.phase == GameState.Phase.STORY and GameState.story.active.node.id == "a_start", "开局先播放主线，支线低 order 不越过主线")
+	_check(not GameState.advance_turn() and not ScheduleManager.confirm_schedule().ok, "对话期间不能推进或确认培养")
+	_check(not ScheduleManager.assign_slot(0, "sword").is_empty() and not ScheduleManager.execute_free_action("visit").ok, "对话期间不能安排日程或消耗精力")
+	_check(not GameState.Cave.build("house", Vector2i(1, 4)).ok and not GameState.Cave.toggle_road(Vector2i(6, 3)).ok, "对话期间不能建造改路")
+	_check(GameState.inventory == stock and GameState.story.completed.is_empty(), "开始展示不扣材料或完成节点")
+	_check(GameState.StoryFlow.advance("a_start", 0).ok, "第一句可以推进")
+	_check(not GameState.StoryFlow.advance("a_start", 0).ok, "重复旧行请求不推进")
+	GameState.inventory.wood = 1
+	_check(not GameState.StoryFlow.advance("a_start", 1).ok and GameState.story.completed.is_empty(), "末句提交前重新校验，失败不完成节点")
+	_check(GameState.inventory.clearheart_grass == stock.clearheart_grass and GameState.unlocked_activities.is_empty(), "费用不足不发奖励或解锁")
+	GameState.inventory.wood = stock.wood
+	_check(GameState.StoryFlow.advance("a_start", 1).ok, "材料足够后原节点可完成")
+	_check(GameState.inventory.wood == int(stock.wood) - 2 and GameState.inventory.clearheart_grass == int(stock.clearheart_grass) + 1, "完成时准确扣费发奖一次")
+	_check(GameState.story.active.node.id == "b_follow" and GameState.story.completed.size() == 1, "完成前置后同类剧情重新查找")
+	_check(not GameState.StoryFlow.advance("a_start", 1).ok, "已完成节点不能重复领取")
+	_check(not ScheduleManager.availability(ScheduleManager.activity_by_id("music")).is_empty(), "下回合解锁尚不可用")
+	_finish_active_story()
+	_check(GameState.story.active.node.id == "d_side", "主线耗尽后处理支线，缺料主线不部分扣费")
+	_check(GameState.inventory.stone == stock.stone and not GameState.story.completed.has("c_competition"), "材料竞争节点缺料不扣其他材料")
+	_finish_active_story()
+	_check(GameState.phase == GameState.Phase.FREE and GameState.story.completed.size() == 3, "读完开始剧情才进入自由阶段")
+	_check(ScheduleManager.availability(ScheduleManager.activity_by_id("craft")).is_empty(), "即时活动解锁在对话后可用")
+	_check(not GameState.story.completed.has("e_from_side"), "支线新开放的主线留给下一检查点，不倒序回跳")
+	_check(not GameState.StoryFlow.begin("turn_start") and GameState.rng.state == rng_state, "同回合同检查点不重复，剧情不使用培养随机数")
+	_build("herb_field", Vector2i(1, 2), "grow_qingyun")
+	_fill()
+	_check(ScheduleManager.confirm_schedule().ok and GameState.phase == GameState.Phase.STORY, "培养生产之后进入结束剧情")
+	_check(GameState.story.active.node.id == "f_end" and GameState.inventory.qingyun_grass == 4, "当回合入库资源满足剧情成本，但读完之前不扣")
+	var production: Dictionary = GameState.last_production.duplicate(true)
+	_check(not ScheduleManager.confirm_schedule().ok and not GameState.advance_turn(), "结束剧情期间不可重复生产或跳下一回合")
+	_finish_active_story()
+	_check(GameState.inventory.qingyun_grass == 3 and GameState.inventory.clearheart_pill == 1, "生产后剧情真实消耗与奖励")
+	_check(GameState.story.active.node.id == "e_from_side", "结束检查点承接开始支线开放的主线")
+	_finish_active_story()
+	_check(GameState.phase == GameState.Phase.RESULTS and GameState.last_production == production, "剧情结束返回札记，不重算生产报告")
+	_check(GameState.advance_turn(), "完成结束剧情后可以进入下一回合")
+	_check(GameState.phase == GameState.Phase.FREE and GameState.story.active.is_empty(), "已完成剧情不会在新回合重播")
+	_check(GameState.unlocked_activities.has("music") and GameState.pending_activity_unlocks.is_empty(), "下回合开始时激活待解锁活动")
+	_check(ScheduleManager.assign_slot(0, "music").is_empty(), "解锁日程实际可安排")
+	GameState.turn = 12
+	GameState.phase = GameState.Phase.RESULTS
+	GameState.advance_turn()
+	_check(GameState.growth_phase() == 1 and GameState.story.active.is_empty(), "切成长阶段不重复完成同一节点")
+	GameState.turn = 60
+	GameState.phase = GameState.Phase.RESULTS
+	GameState.advance_turn()
+	_check(GameState.phase == GameState.Phase.FINISHED, "最终回合仍可正常结束")
+	GameState.reset_game(42)
+	_check(GameState.story.completed.is_empty() and GameState.unlocked_activities.is_empty() and GameState.pending_activity_unlocks.is_empty(), "新局清空完成记录与解锁状态")
+	GameState.story_config = original
+	GameState.config.activities = activities
+	GameState.reset_game(42)
+	story_flow_completed = true
 
 
 ## 固定种子保证可复现；每组案例重开本局，分别验证阶段、成本、随机与 A/B 边界。
@@ -546,6 +831,90 @@ func _capture_ui(directory: String) -> void:
 	ui.queue_free()
 	await get_tree().process_frame
 	ui_completed = true
+
+
+func _capture_story_ui(directory: String) -> void:
+	GameState.reset_game(42)
+	get_window().size = Vector2i(1280, 720)
+	var ui: Control = load("res://scenes/main.tscn").instantiate()
+	add_child(ui)
+	await _snapshot(directory.path_join("11-story-opening.png"))
+	_check(ui.story_view.visible and GameState.phase == GameState.Phase.STORY, "真实界面开局进入剧情")
+	ui.open_menu("work")
+	ui.show_cave()
+	_check(not ui.overlay.visible and not ui.in_cave, "对话时不能通过菜单入口绕开锁定")
+	var escape := InputEventKey.new()
+	escape.keycode = KEY_ESCAPE
+	escape.pressed = true
+	ui.story_view._input(escape)
+	_check(ui.story_view.visible, "Escape 不跳过未完成剧情")
+	for pressed in [true, false]:
+		var enter := InputEventKey.new()
+		enter.keycode = KEY_ENTER
+		enter.pressed = pressed
+		Input.parse_input_event(enter)
+		await get_tree().process_frame
+	_check(GameState.story.completed.is_empty() and int(GameState.story.active.get("line", -1)) == 1, "一次回车只推进一句，当前行 %d" % int(GameState.story.active.get("line", -1)))
+	ui.story_view.advance_button.pressed.emit()
+	_check(GameState.phase == GameState.Phase.FREE and not ui.story_view.visible, "窗口末句之后回到自由操作")
+	for stage in range(3):
+		GameState.reset_game(42)
+		_finish_active_story()
+		GameState.base_stats.power = 1001
+		GameState.turn = [1, 12, 36][stage]
+		GameState.phase = GameState.Phase.RESULTS
+		GameState.advance_turn()
+		get_window().size = [Vector2i(960, 540), Vector2i(1280, 720), Vector2i(1600, 900)][stage]
+		await _snapshot(directory.path_join("12-story-stage-%d.png" % stage))
+		_check(ui.story_view.portrait.texture.region.position.x == stage * 512, "实际对话显示对应阶段立绘")
+		_check(ui.story_view.advance_button.get_global_rect().end.y <= ui.size.y, "小窗口对话按钮不越界")
+		ui.story_view.advance_button.pressed.emit()
+		_check(ui.story_view.effect_label.text.contains("清心丹") and GameState.inventory.clearheart_pill == 0, "末句提前显示奖励，但尚未入库")
+		ui.story_view.advance_button.pressed.emit()
+		_check(GameState.inventory.clearheart_pill == 1 and GameState.phase == GameState.Phase.FREE, "窗口完成奖励只发一次")
+
+	GameState.reset_game(42)
+	_finish_active_story()
+	GameState.base_stats.power = 1001
+	_fill()
+	ui.open_menu("work")
+	ui.confirm_button.pressed.emit()
+	_check(ui.story_view.visible and not ui.overlay.visible, "回合末剧情暂时覆盖札记")
+	ui.story_view.advance_button.pressed.emit()
+	await _snapshot(directory.path_join("13-story-end-reward.png"))
+	ui.story_view.advance_button.pressed.emit()
+	_check(GameState.phase == GameState.Phase.RESULTS and ui.overlay.visible and ui.journal.visible, "回合末剧情读完自动回札记")
+	_check(ui.results.text.contains("清心丹"), "札记包含剧情实际奖励")
+	var report: String = ui.results.text
+	ui._refresh()
+	ui._refresh()
+	_check(ui.results.text == report and ui.results.text.count("灵息初成（示例）") == 1, "重复刷新不追加重复剧情或奖励摘要")
+	await _snapshot(directory.path_join("14-story-journal.png"))
+	ui.next_button.pressed.emit()
+	_check(GameState.phase == GameState.Phase.FREE and not ui.overlay.visible, "剧情接入后下一回合仍回到场景")
+
+	# 内容作者可写长台词，文本滚动而按钮和费用区保持固定位置。
+	var source: Dictionary = GameState.story_config
+	GameState.story_config = source.duplicate(true)
+	GameState.story_config.nodes[0].variants["0"].lines[0].text = "山风穿过竹林，草木在晨光里舒展。".repeat(150)
+	GameState.reset_game(42)
+	_finish_active_story()
+	GameState.base_stats.power = 1001
+	_fill()
+	ui.open_menu("work")
+	ui.confirm_button.pressed.emit()
+	get_window().size = Vector2i(960, 540)
+	await _snapshot(directory.path_join("15-story-long-text.png"))
+	_check(ui.story_view.dialogue.get_content_height() > ui.story_view.dialogue.size.y, "长台词进入可滚动文本区")
+	_check(not ui.story_view.dialogue.get_global_rect().intersects(ui.story_view.advance_button.get_global_rect()), "长台词不覆盖推进按钮")
+	ui.story_view.advance_button.pressed.emit()
+	ui.story_view.advance_button.pressed.emit()
+	_check(GameState.phase == GameState.Phase.RESULTS, "长台词也能正常完成")
+	ui.queue_free()
+	await get_tree().process_frame
+	GameState.story_config = source
+	GameState.reset_game(42)
+	story_ui_completed = true
 
 
 ## 等容器完成布局且本帧渲染结束再读像素；此流程需要有图形输出，不能加 --headless。

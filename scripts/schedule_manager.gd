@@ -21,6 +21,8 @@ func availability(activity: Dictionary) -> String:
 		return "未知活动"
 	if int(activity.get("min_phase", 0)) > GameState.growth_phase():
 		return "尚未开放"
+	if bool(activity.get("requires_unlock", false)) and not GameState.unlocked_activities.has(str(activity.id)):
+		return "需通过剧情解锁"
 	return ""
 
 
@@ -138,10 +140,9 @@ func confirm_schedule(ignore_idle: bool = false) -> Dictionary:
 			"multiplier": outcome.multiplier, "gains": gains,
 			"pressure_before": before, "pressure_after": GameState.pressure
 		})
-	# 培养材料已扣除，再用剩余库存结算洞天；随后才应接入未来的剧情升级判断。
+	# 培养材料已扣除，再用剩余库存结算洞天；真实入库后才检查回合末剧情。
 	GameState.Cave.settle()
-	GameState.phase = GameState.Phase.RESULTS
-	GameState.state_changed.emit()
+	GameState.StoryFlow.begin("turn_end")
 	return {"ok": true, "message": "培养已完成"}
 
 

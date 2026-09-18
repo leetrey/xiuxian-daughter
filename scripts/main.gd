@@ -44,6 +44,8 @@ var active_menu := ""
 var in_cave := false
 var elapsed := 0.0
 var portrait_origin := Vector2.ZERO
+var story_view: Control
+var previous_phase := -1
 
 
 ## 按背景、场景内容、HUD、浮层的顺序添加节点，让前景控件覆盖场景并接收点击。
@@ -86,6 +88,8 @@ func _ready() -> void:
 	idle_dialog.confirmed.connect(_confirm_ignoring_idle)
 	idle_dialog.canceled.connect(show_cave)
 	add_child(idle_dialog)
+	story_view = load("res://scenes/story.tscn").instantiate()
+	add_child(story_view)
 	resized.connect(_layout)
 	# 控件全部创建后再订阅；每次合法操作提交完成时，状态层通知界面重读数据。
 	GameState.state_changed.connect(_refresh)
@@ -395,6 +399,8 @@ func _process(delta: float) -> void:
 
 ## work 按游戏阶段展示日程或札记；重新打开不会重新执行已经完成的培养。
 func open_menu(menu: String) -> void:
+	if GameState.phase == GameState.Phase.STORY:
+		return
 	active_menu = menu
 	work_page.visible = menu == "work"
 	attributes_page.visible = menu == "attributes"
@@ -411,6 +417,8 @@ func close_menu() -> void:
 
 ## 家园与洞天节点都保留在树中，只切换可见性；日程草稿与建筑状态不会被重建。
 func show_cave() -> void:
+	if GameState.phase == GameState.Phase.STORY:
+		return
 	close_menu()
 	in_cave = true
 	home.hide()
@@ -420,6 +428,8 @@ func show_cave() -> void:
 
 
 func show_home() -> void:
+	if GameState.phase == GameState.Phase.STORY:
+		return
 	close_menu()
 	in_cave = false
 	home.show()
@@ -429,6 +439,8 @@ func show_home() -> void:
 
 
 func _unhandled_key_input(event: InputEvent) -> void:
+	if GameState.phase == GameState.Phase.STORY:
+		return
 	if event.is_action_pressed("ui_cancel"):
 		if overlay.visible:
 			close_menu()
@@ -439,6 +451,10 @@ func _unhandled_key_input(event: InputEvent) -> void:
 
 ## 只把 GameState 投影为文字、选项和可用状态；结果使用结算记录而非再次掷骰。
 func _refresh() -> void:
+	var story_finished: bool = previous_phase == GameState.Phase.STORY and GameState.phase == GameState.Phase.RESULTS
+	previous_phase = GameState.phase
+	if GameState.phase == GameState.Phase.STORY:
+		close_menu()
 	var editable: bool = GameState.phase == GameState.Phase.FREE
 	planning.visible = editable
 	journal.visible = not editable
@@ -512,18 +528,30 @@ func _refresh() -> void:
 	var lines: Array[String] = []
 	for entry in GameState.last_results:
 		lines.append("[color=#287764]%s · %s[/color]\n%s   压力 %d → %d" % [entry.name, entry.outcome, _growth_text(entry.gains), entry.pressure_before, entry.pressure_after])
-	results.text = "\n\n".join(lines)
+	# 一次构造完整报告再赋值；同值 text 赋值可能不清空追加内容，不能逐次 append_text。
+	var report := "\n\n".join(lines)
 	if not GameState.last_production.is_empty() and not GameState.last_production.rows.is_empty():
-		results.append_text("\n\n[color=#507f9a]洞天收获[/color]")
+		report += "\n\n[color=#507f9a]洞天收获[/color]"
 		for row in GameState.last_production.rows:
 			var production: Array[String] = []
 			for key in row.outputs:
 				production.append("%s +%d" % [GameState.config.items[key].name, int(row.outputs[key])])
-			results.append_text("\n%s · %s" % [row.name, str(row.reason) if not str(row.reason).is_empty() else " · ".join(production)])
+			report += "\n%s · %s" % [row.name, str(row.reason) if not str(row.reason).is_empty() else " · ".join(production)]
 	if GameState.phase == GameState.Phase.FINISHED:
 		status_label.text = "养成结束"
+	for entry in GameState.story.results:
+		report += "\n\n[color=#946886]%s[/color]" % str(entry.name)
+		for id in entry.costs:
+			report += "\n%s -%d" % [GameState.config.items[id].name, int(entry.costs[id])]
+		for id in entry.rewards.get("items", {}):
+			report += "\n%s +%d" % [GameState.config.items[id].name, int(entry.rewards.items[id])]
+		for id in entry.rewards.get("activities", []):
+			report += "\n%s · %s" % [ScheduleManager.activity_by_id(str(id)).name, "下回合开放" if entry.rewards.get("unlock_timing", "next_turn") == "next_turn" else "已解锁"]
+	results.text = report
 	if active_menu == "work":
 		modal_title.text = "培养日程" if editable else "成长札记"
+	if story_finished:
+		open_menu("work")
 
 
 func _choose(option: int, picker: OptionButton, slot: int) -> void:
@@ -567,12 +595,14 @@ func _confirm_ignoring_idle() -> void:
 
 ## 结果页前进与终局重开共用按钮；是否可以推进仍由 GameState 决定。
 func _next() -> void:
+	if GameState.phase not in [GameState.Phase.RESULTS, GameState.Phase.FINISHED]:
+		return
+	show_home()
 	if GameState.phase == GameState.Phase.FINISHED:
 		GameState.reset_game()
 	else:
 		GameState.advance_turn()
 	_set_notice("")
-	show_home()
 
 
 func _set_notice(message: String) -> void:
